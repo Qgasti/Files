@@ -1,4 +1,4 @@
-﻿// Copyright (c) Files Community
+// Copyright (c) Files Community
 // Licensed under the MIT License.
 
 using Microsoft.Extensions.Logging;
@@ -10,6 +10,8 @@ namespace Files.App.Services
 {
 	public sealed class RemovableDrivesService : IRemovableDrivesService
 	{
+		private static readonly TimeSpan DriveInitializationTimeout = TimeSpan.FromSeconds(5);
+
 		public IStorageDeviceWatcher CreateWatcher()
 		{
 			return new WindowsStorageDeviceWatcher();
@@ -17,41 +19,80 @@ namespace Files.App.Services
 
 		public async IAsyncEnumerable<IFolder> GetDrivesAsync()
 		{
-			var list = DriveInfo.GetDrives();
-			var pCloudDrivePath = App.AppModel.PCloudDrivePath;
-			foreach (var drive in list)
+			var driveTasks = DriveInfo.GetDrives()
+				.Select(InitializeDriveWithTimeoutAsync)
+				.ToArray();
+			var drives = await Task.WhenAll(driveTasks);
+
+			foreach (var drive in drives)
+			{
+				if (drive is not null)
+					yield return drive;
+			}
+		}
+
+		private static async Task<IFolder?> InitializeDriveWithTimeoutAsync(DriveInfo drive)
+		{
+			var driveName = drive.Name;
+			using var timeoutCts = new CancellationTokenSource();
+			var initializationTask = Task.Run(() => InitializeDriveAsync(drive, timeoutCts.Token));
+
+			if (await Task.WhenAny(initializationTask, Task.Delay(DriveInitializationTimeout)) != initializationTask)
+			{
+				timeoutCts.Cancel();
+				_ = initializationTask.ContinueWith(
+					task => App.Logger.LogDebug(task.Exception, "Drive initialization completed with an error after timing out for {Drive}.", driveName),
+					CancellationToken.None,
+					TaskContinuationOptions.OnlyOnFaulted,
+					TaskScheduler.Default);
+				App.Logger.LogWarning("Drive initialization timed out after {TimeoutSeconds} seconds for {Drive}; skipping it during startup.", DriveInitializationTimeout.TotalSeconds, driveName);
+				return null;
+			}
+
+			return await initializationTask;
+		}
+
+		private static async Task<IFolder?> InitializeDriveAsync(DriveInfo drive, CancellationToken cancellationToken)
+		{
+			try
 			{
 				if (!drive.IsReady)
-					continue;
+					return null;
 
+				cancellationToken.ThrowIfCancellationRequested();
 				var driveLabel = DriveHelpers.GetExtendedDriveLabel(drive);
-				// Filter out cloud drives
-				// We don't want cloud drives to appear in the plain "Drives" sections.
+				var pCloudDrivePath = App.AppModel.PCloudDrivePath;
+
+				// Filter out cloud drives from the plain Drives section.
 				if (driveLabel.Equals("Google Drive") || drive.Name.Equals(pCloudDrivePath))
-					continue;
+					return null;
 
-				var res = await FilesystemTasks.Wrap(() => StorageFolder.GetFolderFromPathAsync(drive.Name).AsTask());
-				if (res.ErrorCode is FileSystemStatusCode.Unauthorized)
+				var res = await FilesystemTasks.Wrap(() => StorageFolder.GetFolderFromPathAsync(drive.Name).AsTask(cancellationToken));
+				if (!res)
 				{
 					App.Logger.LogWarning($"{res.ErrorCode}: Attempting to add the device, {drive.Name},"
 						+ " failed at the StorageFolder initialization step. This device will be ignored.");
-					continue;
-				}
-				else if (!res)
-				{
-					App.Logger.LogWarning($"{res.ErrorCode}: Attempting to add the device, {drive.Name},"
-						+ " failed at the StorageFolder initialization step. This device will be ignored.");
-					continue;
+					return null;
 				}
 
+				cancellationToken.ThrowIfCancellationRequested();
 				using var thumbnail = await DriveHelpers.GetThumbnailAsync(res.Result);
+				cancellationToken.ThrowIfCancellationRequested();
+
 				var type = DriveHelpers.GetDriveType(drive);
-				var label = DriveHelpers.GetExtendedDriveLabel(drive);
-				var driveItem = await DriveItem.CreateFromPropertiesAsync(res.Result, drive.Name.TrimEnd('\\'), label, type, thumbnail);
+				var driveItem = await DriveItem.CreateFromPropertiesAsync(res.Result, drive.Name.TrimEnd('\\'), driveLabel, type, thumbnail);
 
 				App.Logger.LogInformation($"Drive added: {driveItem.Path}, {driveItem.Type}");
-
-				yield return driveItem;
+				return driveItem;
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				return null;
+			}
+			catch (Exception ex)
+			{
+				App.Logger.LogWarning(ex, "Drive initialization failed for {Drive}; skipping it during startup.", drive.Name);
+				return null;
 			}
 		}
 

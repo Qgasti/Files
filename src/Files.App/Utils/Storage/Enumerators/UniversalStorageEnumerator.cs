@@ -14,8 +14,6 @@ namespace Files.App.Utils.Storage
 	{
 		private static readonly ISizeProvider folderSizeProvider = Ioc.Default.GetService<ISizeProvider>();
 
-		private static readonly IIconCacheService iconCacheService = Ioc.Default.GetRequiredService<IIconCacheService>();
-
 		public static async Task<List<ListedItem>> ListEntries(
 			BaseStorageFolder rootFolder,
 			StorageFolderWithPath currentStorageFolder,
@@ -90,8 +88,6 @@ namespace Files.App.Utils.Storage
 							var folder = await AddFolderAsync(item.AsBaseStorageFolder(), currentStorageFolder, cancellationToken);
 							if (folder is not null)
 							{
-								folder.PreloadedIconData = await iconCacheService.GetIconAsync(folder.ItemPath, null, true);
-
 								if (defaultIconPairs?.ContainsKey(string.Empty) ?? false)
 									folder.FileImage = defaultIconPairs[string.Empty];
 
@@ -116,8 +112,6 @@ namespace Files.App.Utils.Storage
 							var fileEntry = await AddFileAsync(item.AsBaseStorageFile(), currentStorageFolder, cancellationToken);
 							if (fileEntry is not null)
 							{
-								fileEntry.PreloadedIconData = await iconCacheService.GetIconAsync(fileEntry.ItemPath, fileEntry.FileExtension, false);
-
 								if (defaultIconPairs is not null)
 								{
 									if (!string.IsNullOrEmpty(fileEntry.FileExtension))

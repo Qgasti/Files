@@ -11,12 +11,12 @@ namespace Files.App.Utils.Storage
 {
 	public static class Win32StorageEnumerator
 	{
+		private const int MaxConcurrentItemInitializations = 8;
+
 		private static readonly ISizeProvider folderSizeProvider = Ioc.Default.GetService<ISizeProvider>();
 		private static readonly IStorageCacheService fileListCache = Ioc.Default.GetRequiredService<IStorageCacheService>();
 
 		private static readonly string folderTypeTextLocalized = Strings.Folder.GetLocalizedResource();
-
-		private static readonly IIconCacheService iconCacheService = Ioc.Default.GetRequiredService<IIconCacheService>();
 
 		public static async Task<List<ListedItem>> ListEntries(
 			string path,
@@ -29,10 +29,12 @@ namespace Files.App.Utils.Storage
 		{
 			var sampler = new IntervalSampler(500);
 			var tempList = new List<ListedItem>();
+			var pendingItems = new List<Task<ListedItem>>(MaxConcurrentItemInitializations);
 			var count = 0;
+			var firstBatchPublished = false;
 
 			IUserSettingsService userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
-			bool CalculateFolderSizes = userSettingsService.FoldersSettingsService.CalculateFolderSizes;
+			bool calculateFolderSizes = userSettingsService.FoldersSettingsService.CalculateFolderSizes;
 			bool showHiddenItems = userSettingsService.FoldersSettingsService.ShowHiddenItems;
 			bool showProtectedSystemFiles = userSettingsService.FoldersSettingsService.ShowProtectedSystemFiles;
 			bool showDotFiles = userSettingsService.FoldersSettingsService.ShowDotFiles;
@@ -40,75 +42,92 @@ namespace Files.App.Utils.Storage
 
 			var isGitRepo = GitHelpers.IsRepositoryEx(path, out var repoPath) && !string.IsNullOrEmpty((await GitHelpers.GetRepositoryHead(repoPath))?.Name);
 
-			do
+			try
 			{
-				var isSystem = ((FileAttributes)findData.dwFileAttributes & FileAttributes.System) == FileAttributes.System;
-				var isHidden = ((FileAttributes)findData.dwFileAttributes & FileAttributes.Hidden) == FileAttributes.Hidden;
-				var startWithDot = findData.cFileName.StartsWith('.');
-				if ((!isHidden ||
-					(showHiddenItems &&
-					(!isSystem || showProtectedSystemFiles))) &&
-					(!startWithDot || showDotFiles))
+				do
 				{
-					if (((FileAttributes)findData.dwFileAttributes & FileAttributes.Directory) != FileAttributes.Directory)
-					{
-						var file = await GetFile(findData, path, isGitRepo, cancellationToken);
-						if (file is not null)
-						{
-							file.PreloadedIconData = await iconCacheService.GetIconAsync(file.ItemPath, file.FileExtension, false);
-							tempList.Add(file);
-							++count;
+					var attributes = (FileAttributes)findData.dwFileAttributes;
+					var isSystem = (attributes & FileAttributes.System) == FileAttributes.System;
+					var isHidden = (attributes & FileAttributes.Hidden) == FileAttributes.Hidden;
+					var startWithDot = findData.cFileName.StartsWith('.');
+					var isDirectory = (attributes & FileAttributes.Directory) == FileAttributes.Directory;
+					var shouldInclude = (!isHidden ||
+						(showHiddenItems && (!isSystem || showProtectedSystemFiles))) &&
+						(!startWithDot || showDotFiles) &&
+						(!isDirectory || (findData.cFileName != "." && findData.cFileName != ".."));
 
-							if (areAlternateStreamsVisible)
-							{
-								tempList.AddRange(EnumAdsForPath(file.ItemPath, file));
-							}
+					if (shouldInclude)
+					{
+						var entryData = findData;
+						pendingItems.Add(Task.Run(() => isDirectory
+							? GetFolder(entryData, path, isGitRepo, cancellationToken)
+							: GetFile(entryData, path, isGitRepo, cancellationToken)));
+
+						if (pendingItems.Count >= MaxConcurrentItemInitializations)
+						{
+							await ResolvePendingItemsAsync();
+							await PublishIntermediateItemsAsync();
 						}
 					}
-					else if (((FileAttributes)findData.dwFileAttributes & FileAttributes.Directory) == FileAttributes.Directory)
-					{
-						if (findData.cFileName != "." && findData.cFileName != "..")
-						{
-							var folder = await GetFolder(findData, path, isGitRepo, cancellationToken);
-							if (folder is not null)
-							{
-								folder.PreloadedIconData = await iconCacheService.GetIconAsync(folder.ItemPath, null, true);
-								tempList.Add(folder);
-								++count;
 
-								if (areAlternateStreamsVisible)
-									tempList.AddRange(EnumAdsForPath(folder.ItemPath, folder));
+					if (cancellationToken.IsCancellationRequested || (countLimit >= 0 && count >= countLimit))
+						break;
+				} while (Win32PInvoke.FindNextFile(hFile, out findData));
 
-								if (CalculateFolderSizes)
-								{
-									if (folderSizeProvider.TryGetSize(folder.ItemPath, out var size))
-									{
-										folder.FileSizeBytes = (long)size;
-										folder.FileSize = size.ToSizeString();
-									}
-
-									_ = folderSizeProvider.UpdateAsync(folder.ItemPath, cancellationToken);
-								}
-							}
-						}
-					}
-				}
-
-				if (cancellationToken.IsCancellationRequested || count == countLimit)
-					break;
-
-				if (intermediateAction is not null && (count == 32 || sampler.CheckNow()))
-				{
-					await intermediateAction(tempList);
-
-					// clear the temporary list every time we do an intermediate action
-					tempList.Clear();
-				}
-			} while (Win32PInvoke.FindNextFile(hFile, out findData));
-
-			Win32PInvoke.FindClose(hFile);
+				await ResolvePendingItemsAsync();
+			}
+			finally
+			{
+				Win32PInvoke.FindClose(hFile);
+			}
 
 			return tempList;
+
+			async Task ResolvePendingItemsAsync()
+			{
+				if (pendingItems.Count == 0)
+					return;
+
+				var resolvedItems = await Task.WhenAll(pendingItems);
+				pendingItems.Clear();
+
+				foreach (var item in resolvedItems)
+				{
+					if (item is null)
+						continue;
+
+					tempList.Add(item);
+					++count;
+
+					if (areAlternateStreamsVisible)
+						tempList.AddRange(EnumAdsForPath(item.ItemPath, item));
+
+					if (calculateFolderSizes && item.IsFolder)
+					{
+						if (folderSizeProvider.TryGetSize(item.ItemPath, out var size))
+						{
+							item.FileSizeBytes = (long)size;
+							item.FileSize = size.ToSizeString();
+						}
+
+						_ = folderSizeProvider.UpdateAsync(item.ItemPath, cancellationToken);
+					}
+
+					if (countLimit >= 0 && count >= countLimit)
+						break;
+				}
+			}
+
+			async Task PublishIntermediateItemsAsync()
+			{
+				if (intermediateAction is not null && tempList.Count > 0 &&
+					((!firstBatchPublished && count >= 32) || sampler.CheckNow()))
+				{
+					await intermediateAction(tempList);
+					tempList.Clear();
+					firstBatchPublished = true;
+				}
+			}
 		}
 
 		private static IEnumerable<ListedItem> EnumAdsForPath(string itemPath, ListedItem main)
