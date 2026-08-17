@@ -55,6 +55,7 @@ namespace Files.App.Views.Shells
 
 		protected override void ShellPage_NavigationRequested(object sender, PathNavigationEventArgs e)
 		{
+			CaptureCurrentNavigationSnapshotSelection();
 			this.FindAscendant<ColumnsLayoutPage>()?.SetSelectedPathOrNavigate(e);
 		}
 
@@ -191,6 +192,8 @@ namespace Files.App.Views.Shells
 		{
 			if (string.IsNullOrEmpty(navigationPath))
 				return;
+
+			CaptureCurrentNavigationSnapshotSelection();
 
 			var columnsLayoutPage = this.FindAscendant<ColumnsLayoutPage>();
 			if (columnsLayoutPage != null)

@@ -19,6 +19,7 @@ namespace Files.App.ViewModels.Settings
 	{
 		private IUserSettingsService UserSettingsService { get; } = Ioc.Default.GetRequiredService<IUserSettingsService>();
 		private ICommonDialogService CommonDialogService { get; } = Ioc.Default.GetRequiredService<ICommonDialogService>();
+		private IThumbnailCacheService ThumbnailCacheService { get; } = Ioc.Default.GetRequiredService<IThumbnailCacheService>();
 		public ICommandManager Commands { get; } = Ioc.Default.GetRequiredService<ICommandManager>();
 
 		private readonly IFileTagsSettingsService fileTagsSettingsService = Ioc.Default.GetRequiredService<IFileTagsSettingsService>();
@@ -381,6 +382,7 @@ namespace Files.App.ViewModels.Settings
 				{
 					UserSettingsService.GeneralSettingsService.ThumbnailCacheSizeLimit = value;
 					OnPropertyChanged();
+					_ = TrimThumbnailCacheAsync();
 				}
 			}
 		}
@@ -401,12 +403,21 @@ namespace Files.App.ViewModels.Settings
 
 		private async Task ClearThumbnailCacheAsync()
 		{
-			//TODO: Clear thumbnail cache.
+			await ThumbnailCacheService.ClearAsync();
+			await UpdateCacheSizeAsync();
 		}
 
 		private async Task UpdateCacheSizeAsync()
 		{
-			//TODO: Get thumbnail cache size and update CacheSizeText and IsClearCacheButtonEnabled accordingly.
+			var cacheSize = await ThumbnailCacheService.GetSizeAsync();
+			CacheSizeText = cacheSize.ToSizeString();
+			IsClearCacheButtonEnabled = cacheSize > 0;
+		}
+
+		private async Task TrimThumbnailCacheAsync()
+		{
+			await ThumbnailCacheService.TrimAsync();
+			await UpdateCacheSizeAsync();
 		}
 
 		public async Task OpenFilesOnWindowsStartupAsync()

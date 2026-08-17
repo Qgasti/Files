@@ -52,10 +52,16 @@ namespace Files.App
 
 		public async Task InitializeApplicationAsync(object activatedEventArgs)
 		{
+			App.Logger.LogDebug("Main window initialization entered for {ActivationType}.", activatedEventArgs.GetType().Name);
 			var rootFrame = EnsureWindowIsInitialized();
 
 			if (rootFrame is null)
+			{
+				App.Logger.LogWarning("Main window initialization stopped because the root frame was unavailable.");
 				return;
+			}
+
+			App.Logger.LogDebug("Main window root frame is ready; current content is {ContentType}.", rootFrame.Content?.GetType().Name ?? "null");
 
 			// Set system backdrop
 			SystemBackdrop = new AppSystemBackdrop();
@@ -79,7 +85,9 @@ namespace Files.App
 					{
 						// When the navigation stack isn't restored navigate to the first page,
 						// configuring the new page by passing required information as a navigation parameter
-						rootFrame.Navigate(typeof(MainPage), launchArgs.Arguments, new SuppressNavigationTransitionInfo());
+						App.Logger.LogDebug("Navigating the root frame from the splash screen to MainPage.");
+						var navigated = rootFrame.Navigate(typeof(MainPage), launchArgs.Arguments, new SuppressNavigationTransitionInfo());
+						App.Logger.LogDebug("Root-frame navigation to MainPage returned {Navigated}.", navigated);
 					}
 					else if (!(string.IsNullOrEmpty(launchArgs.Arguments) && MainPageViewModel.AppInstances.Count > 0))
 					{

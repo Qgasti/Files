@@ -245,7 +245,7 @@ namespace Files.App.Utils
 		{
 			get
 			{
-				if (PrimaryItemAttribute == StorageItemTypes.File)
+				if (PrimaryItemAttribute == StorageItemTypes.File || IsArchive)
 				{
 					var nameWithoutExtension = Path.GetFileNameWithoutExtension(itemNameRaw);
 					if (!string.IsNullOrEmpty(nameWithoutExtension) && !UserSettingsService.FoldersSettingsService.ShowFileExtensions)
@@ -475,7 +475,17 @@ namespace Files.App.Utils
 		public bool IsLibrary => this is LibraryItem;
 		public bool IsLinkItem => IsShortcut && ((IShortcutItem)this).IsUrl;
 		public bool IsFtpItem => this is FtpItem;
-		public bool IsArchive => this is ZipItem;
+		private bool isArchive;
+		public bool IsArchive
+		{
+			get => isArchive || this is ZipItem;
+			internal set
+			{
+				if (SetProperty(ref isArchive, value))
+					OnPropertyChanged(nameof(Name));
+			}
+		}
+		internal bool NeedsArchiveAssociationCheck { get; set; }
 		public bool IsAlternateStream => this is AlternateStreamItem;
 		public bool IsGitItem => this is IGitItem;
 		public virtual bool IsExecutable => !IsFolder && FileExtensionHelpers.IsExecutableFile(ItemPath);

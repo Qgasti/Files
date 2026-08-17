@@ -46,6 +46,7 @@ namespace Files.App.Views.Shells
 		protected readonly IUpdateService updateSettingsService = Ioc.Default.GetRequiredService<IUpdateService>();
 
 		protected readonly ICommandManager commands = Ioc.Default.GetRequiredService<ICommandManager>();
+		protected readonly IContentPageContext contentPageContext = Ioc.Default.GetRequiredService<IContentPageContext>();
 
 		public NavigationToolbarViewModel ToolbarViewModel { get; } = new NavigationToolbarViewModel();
 
@@ -540,7 +541,8 @@ namespace Files.App.Views.Shells
 			else if (CurrentPageType != typeof(HomePage))
 			{
 				ToolbarViewModel.CanRefresh = false;
-				ShellViewModel?.RefreshItems(null);
+				var scrollPosition = SlimContentPage?.CaptureScrollPosition();
+				ShellViewModel?.RefreshItems(null, () => SlimContentPage?.RestoreScrollPosition(scrollPosition));
 			}
 			else if (ItemDisplay.Content is HomePage homePage)
 			{
@@ -552,6 +554,7 @@ namespace Files.App.Views.Shells
 
 		public virtual void Back_Click()
 		{
+			CaptureCurrentNavigationSnapshotSelection();
 			var previousPageContent = ItemDisplay.BackStack[ItemDisplay.BackStack.Count - 1];
 			HandleBackForwardRequest(previousPageContent);
 
@@ -561,11 +564,21 @@ namespace Files.App.Views.Shells
 
 		public virtual void Forward_Click()
 		{
+			CaptureCurrentNavigationSnapshotSelection();
 			var incomingPageContent = ItemDisplay.ForwardStack[ItemDisplay.ForwardStack.Count - 1];
 			HandleBackForwardRequest(incomingPageContent);
 
 			if (ItemDisplay.CanGoForward)
 				ItemDisplay.GoForward();
+		}
+
+		protected void CaptureCurrentNavigationSnapshotSelection()
+		{
+			var selectedItems = ReferenceEquals(contentPageContext.ShellPage?.ShellViewModel, ShellViewModel)
+				? contentPageContext.SelectedItems.ToList()
+				: SlimContentPage?.SelectedItems;
+			if (selectedItems is not null)
+				ShellViewModel.UpdateFolderNavigationSnapshotSelection(selectedItems);
 		}
 
 		public void ResetNavigationStackLayoutMode()

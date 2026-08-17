@@ -12,6 +12,7 @@ namespace Files.App.Utils.Storage
 	public static class Win32StorageEnumerator
 	{
 		private const int MaxConcurrentItemInitializations = 8;
+		private const int MaxIntermediateBatchSize = 128;
 
 		private static readonly ISizeProvider folderSizeProvider = Ioc.Default.GetService<ISizeProvider>();
 		private static readonly IStorageCacheService fileListCache = Ioc.Default.GetRequiredService<IStorageCacheService>();
@@ -24,6 +25,7 @@ namespace Files.App.Utils.Storage
 			Win32PInvoke.WIN32_FIND_DATA findData,
 			CancellationToken cancellationToken,
 			int countLimit,
+			bool isGitRepo,
 			Func<List<ListedItem>, Task> intermediateAction
 		)
 		{
@@ -40,12 +42,11 @@ namespace Files.App.Utils.Storage
 			bool showDotFiles = userSettingsService.FoldersSettingsService.ShowDotFiles;
 			bool areAlternateStreamsVisible = userSettingsService.FoldersSettingsService.AreAlternateStreamsVisible;
 
-			var isGitRepo = GitHelpers.IsRepositoryEx(path, out var repoPath) && !string.IsNullOrEmpty((await GitHelpers.GetRepositoryHead(repoPath))?.Name);
-
 			try
 			{
 				do
 				{
+					cancellationToken.ThrowIfCancellationRequested();
 					var attributes = (FileAttributes)findData.dwFileAttributes;
 					var isSystem = (attributes & FileAttributes.System) == FileAttributes.System;
 					var isHidden = (attributes & FileAttributes.Hidden) == FileAttributes.Hidden;
@@ -59,8 +60,8 @@ namespace Files.App.Utils.Storage
 					if (shouldInclude)
 					{
 						var entryData = findData;
-						pendingItems.Add(Task.Run(() => isDirectory
-							? GetFolder(entryData, path, isGitRepo, cancellationToken)
+						pendingItems.Add(Task.Run(async () => isDirectory
+							? await GetFolder(entryData, path, isGitRepo, cancellationToken)
 							: GetFile(entryData, path, isGitRepo, cancellationToken)));
 
 						if (pendingItems.Count >= MaxConcurrentItemInitializations)
@@ -75,6 +76,7 @@ namespace Files.App.Utils.Storage
 				} while (Win32PInvoke.FindNextFile(hFile, out findData));
 
 				await ResolvePendingItemsAsync();
+				cancellationToken.ThrowIfCancellationRequested();
 			}
 			finally
 			{
@@ -88,7 +90,9 @@ namespace Files.App.Utils.Storage
 				if (pendingItems.Count == 0)
 					return;
 
+				cancellationToken.ThrowIfCancellationRequested();
 				var resolvedItems = await Task.WhenAll(pendingItems);
+				cancellationToken.ThrowIfCancellationRequested();
 				pendingItems.Clear();
 
 				foreach (var item in resolvedItems)
@@ -120,10 +124,12 @@ namespace Files.App.Utils.Storage
 
 			async Task PublishIntermediateItemsAsync()
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				if (intermediateAction is not null && tempList.Count > 0 &&
-					((!firstBatchPublished && count >= 32) || sampler.CheckNow()))
+					((!firstBatchPublished && count >= 32) || tempList.Count >= MaxIntermediateBatchSize || sampler.CheckNow()))
 				{
 					await intermediateAction(tempList);
+					cancellationToken.ThrowIfCancellationRequested();
 					tempList.Clear();
 					firstBatchPublished = true;
 				}
@@ -245,7 +251,7 @@ namespace Files.App.Utils.Storage
 			}
 		}
 
-		public static async Task<ListedItem> GetFile(
+		public static ListedItem GetFile(
 			Win32PInvoke.WIN32_FIND_DATA findData,
 			string pathRoot,
 			bool isGitRepo,
@@ -300,112 +306,38 @@ namespace Files.App.Utils.Storage
 
 			if (isSymlink)
 			{
-				var targetPath = Win32Helper.ParseSymLink(itemPath);
-				if (isGitRepo)
-				{
-					return new GitShortcutItem()
-					{
-						PrimaryItemAttribute = StorageItemTypes.File,
-						FileExtension = itemFileExtension,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						FileImage = null,
-						LoadFileIcon = itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = Strings.Shortcut.GetLocalizedResource(),
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes,
-						TargetPath = targetPath,
-						IsSymLink = true,
-					};
-				}
-				else
-				{
-					return new ShortcutItem(null)
-					{
-						PrimaryItemAttribute = StorageItemTypes.File,
-						FileExtension = itemFileExtension,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						FileImage = null,
-						LoadFileIcon = itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = Strings.Shortcut.GetLocalizedResource(),
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes,
-						TargetPath = targetPath,
-						IsSymLink = true
-					};
-				}
+				return CreateUnresolvedShortcutItem(
+					isGitRepo,
+					isUrl: false,
+					isSymlink: true,
+					itemPath,
+					itemName,
+					itemFileExtension,
+					isHidden,
+					opacity,
+					itemModifiedDate,
+					itemLastAccessDate,
+					itemCreatedDate,
+					itemSize,
+					itemSizeBytes);
 			}
 			else if (FileExtensionHelpers.IsShortcutOrUrlFile(findData.cFileName))
 			{
 				var isUrl = FileExtensionHelpers.IsWebLinkFile(findData.cFileName);
-
-				var shInfo = await FileOperationsHelpers.ParseLinkAsync(itemPath);
-				if (shInfo is null)
-					return null;
-
-				if (isGitRepo)
-				{
-					return new GitShortcutItem()
-					{
-						PrimaryItemAttribute = shInfo.IsFolder ? StorageItemTypes.Folder : StorageItemTypes.File,
-						FileExtension = itemFileExtension,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						FileImage = null,
-						LoadFileIcon = !shInfo.IsFolder && itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = isUrl ? Strings.ShortcutWebLinkFileType.GetLocalizedResource() : Strings.Shortcut.GetLocalizedResource(),
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes,
-						TargetPath = shInfo.TargetPath,
-						Arguments = shInfo.Arguments,
-						WorkingDirectory = shInfo.WorkingDirectory,
-						RunAsAdmin = shInfo.RunAsAdmin,
-						ShowWindowCommand = shInfo.ShowWindowCommand,
-						IsUrl = isUrl,
-					};
-				}
-				else
-				{
-					return new ShortcutItem(null)
-					{
-						PrimaryItemAttribute = shInfo.IsFolder ? StorageItemTypes.Folder : StorageItemTypes.File,
-						FileExtension = itemFileExtension,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						FileImage = null,
-						LoadFileIcon = !shInfo.IsFolder && itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = isUrl ? Strings.ShortcutWebLinkFileType.GetLocalizedResource() : Strings.Shortcut.GetLocalizedResource(),
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes,
-						TargetPath = shInfo.TargetPath,
-						Arguments = shInfo.Arguments,
-						WorkingDirectory = shInfo.WorkingDirectory,
-						RunAsAdmin = shInfo.RunAsAdmin,
-						ShowWindowCommand = shInfo.ShowWindowCommand,
-						IsUrl = isUrl,
-					};
-				}
+				return CreateUnresolvedShortcutItem(
+					isGitRepo,
+					isUrl,
+					isSymlink: false,
+					itemPath,
+					itemName,
+					itemFileExtension,
+					isHidden,
+					opacity,
+					itemModifiedDate,
+					itemLastAccessDate,
+					itemCreatedDate,
+					itemSize,
+					itemSizeBytes);
 			}
 			else if (App.LibraryManager.TryGetLibrary(itemPath, out LibraryLocationItem library))
 			{
@@ -418,67 +350,65 @@ namespace Files.App.Utils.Storage
 			}
 			else
 			{
-				if (ZipStorageFolder.IsZipPath(itemPath) && await ZipStorageFolder.CheckDefaultZipApp(itemPath))
-				{
-					return new ZipItem(null)
-					{
-						PrimaryItemAttribute = StorageItemTypes.Folder, // Treat zip files as folders
-						FileExtension = itemFileExtension,
-						FileImage = null,
-						LoadFileIcon = itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = itemType,
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes
-					};
-				}
-				else if (isGitRepo)
-				{
-					return new GitItem()
-					{
-						PrimaryItemAttribute = StorageItemTypes.File,
-						FileExtension = itemFileExtension,
-						FileImage = null,
-						LoadFileIcon = itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = itemType,
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes
-					};
-				}
-				else
-				{
-					return new ListedItem(null)
-					{
-						PrimaryItemAttribute = StorageItemTypes.File,
-						FileExtension = itemFileExtension,
-						FileImage = null,
-						LoadFileIcon = itemThumbnailImgVis,
-						ItemNameRaw = itemName,
-						IsHiddenItem = isHidden,
-						Opacity = opacity,
-						ItemDateModifiedReal = itemModifiedDate,
-						ItemDateAccessedReal = itemLastAccessDate,
-						ItemDateCreatedReal = itemCreatedDate,
-						ItemType = itemType,
-						ItemPath = itemPath,
-						FileSize = itemSize,
-						FileSizeBytes = itemSizeBytes
-					};
-				}
+				ListedItem item = isGitRepo ? new GitItem() : new ListedItem(null);
+				item.PrimaryItemAttribute = StorageItemTypes.File;
+				item.FileExtension = itemFileExtension;
+				item.FileImage = null;
+				item.LoadFileIcon = itemThumbnailImgVis;
+				item.ItemNameRaw = itemName;
+				item.IsHiddenItem = isHidden;
+				item.Opacity = opacity;
+				item.ItemDateModifiedReal = itemModifiedDate;
+				item.ItemDateAccessedReal = itemLastAccessDate;
+				item.ItemDateCreatedReal = itemCreatedDate;
+				item.ItemType = itemType;
+				item.ItemPath = itemPath;
+				item.FileSize = itemSize;
+				item.FileSizeBytes = itemSizeBytes;
+				item.NeedsArchiveAssociationCheck = FileExtensionHelpers.IsBrowsableZipFile(itemPath, out _);
+				return item;
 			}
+		}
+
+		private static ListedItem CreateUnresolvedShortcutItem(
+			bool isGitRepo,
+			bool isUrl,
+			bool isSymlink,
+			string itemPath,
+			string itemName,
+			string? itemFileExtension,
+			bool isHidden,
+			double opacity,
+			DateTime itemModifiedDate,
+			DateTime itemLastAccessDate,
+			DateTime itemCreatedDate,
+			string itemSize,
+			long itemSizeBytes)
+		{
+			ListedItem item = isGitRepo ? new GitShortcutItem() : new ShortcutItem(null);
+			item.PrimaryItemAttribute = StorageItemTypes.File;
+			item.FileExtension = itemFileExtension;
+			item.IsHiddenItem = isHidden;
+			item.Opacity = opacity;
+			item.FileImage = null;
+			item.LoadFileIcon = false;
+			item.ItemNameRaw = itemName;
+			item.ItemDateModifiedReal = itemModifiedDate;
+			item.ItemDateAccessedReal = itemLastAccessDate;
+			item.ItemDateCreatedReal = itemCreatedDate;
+			item.ItemType = isUrl
+				? Strings.ShortcutWebLinkFileType.GetLocalizedResource()
+				: Strings.Shortcut.GetLocalizedResource();
+			item.ItemPath = itemPath;
+			item.FileSize = itemSize;
+			item.FileSizeBytes = itemSizeBytes;
+
+			var shortcut = (IShortcutItem)item;
+			shortcut.TargetPath = itemPath;
+			shortcut.IsUrl = isUrl;
+			shortcut.IsSymLink = isSymlink;
+
+			return item;
 		}
 	}
 }

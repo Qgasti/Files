@@ -94,6 +94,25 @@ namespace Files.App.Views.Layouts
 		public CurrentInstanceViewModel? InstanceViewModel
 			=> ParentShellPageInstance?.InstanceViewModel;
 
+		public Point? CaptureScrollPosition()
+		{
+			var scroller = ItemsControl?.FindDescendant<ScrollViewer>(element => element.Name == "ScrollViewer");
+			return scroller is null ? null : new Point(scroller.HorizontalOffset, scroller.VerticalOffset);
+		}
+
+		public void RestoreScrollPosition(Point? position)
+		{
+			if (position is not Point offset)
+				return;
+
+			DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+			{
+				ItemsControl?.UpdateLayout();
+				var scroller = ItemsControl?.FindDescendant<ScrollViewer>(element => element.Name == "ScrollViewer");
+				scroller?.ChangeView(offset.X, offset.Y, null, true);
+			});
+		}
+
 		public static AppModel AppModel
 			=> App.AppModel;
 

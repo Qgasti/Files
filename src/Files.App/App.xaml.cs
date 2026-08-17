@@ -123,22 +123,37 @@ namespace Files.App
 				if (!(isStartupTask && isLeaveAppRunning))
 				{
 					// Wait for the UI to update
+					Logger.LogDebug("Waiting for the splash screen to render.");
 					await SplashScreenLoadingTCS!.Task.WithTimeoutAsync(TimeSpan.FromMilliseconds(500));
 					SplashScreenLoadingTCS = null;
+					Logger.LogDebug("Splash-screen render wait completed.");
 
 					// Create a system tray icon
-					SystemTrayIcon = new SystemTrayIcon();
+					Logger.LogDebug("Creating the system tray icon.");
+					TryCreateSystemTrayIcon();
+					Logger.LogDebug("System tray icon initialization attempt completed.");
 					if (userSettingsService.GeneralSettingsService.ShowSystemTrayIcon)
-						SystemTrayIcon.Show();
+						SystemTrayIcon?.Show();
 
-					_ = MainWindow.Instance.InitializeApplicationAsync(appActivationArguments.Data);
+					var mainWindowInitializationStarted = Stopwatch.GetTimestamp();
+					try
+					{
+						await MainWindow.Instance.InitializeApplicationAsync(appActivationArguments.Data);
+						Logger.LogInformation(
+							"Main window initialization completed in {ElapsedMs:F1} ms.",
+							Stopwatch.GetElapsedTime(mainWindowInitializationStarted).TotalMilliseconds);
+					}
+					catch (Exception ex)
+					{
+						Logger.LogCritical(ex, "Main window initialization failed.");
+					}
 				}
 				else
 				{
 					// Create a system tray icon
-					SystemTrayIcon = new SystemTrayIcon();
+					TryCreateSystemTrayIcon();
 					if (userSettingsService.GeneralSettingsService.ShowSystemTrayIcon)
-						SystemTrayIcon.Show();
+						SystemTrayIcon?.Show();
 
 					// Sleep current instance
 					Program.Pool = new(0, 1, $"Files-{AppLifecycleHelper.AppEnvironment}-Instance");
@@ -154,6 +169,19 @@ namespace Files.App
 				}
 
 				await AppLifecycleHelper.InitializeAppComponentsAsync();
+			}
+		}
+
+		private static void TryCreateSystemTrayIcon()
+		{
+			try
+			{
+				SystemTrayIcon = new SystemTrayIcon();
+			}
+			catch (Exception ex)
+			{
+				Logger.LogWarning(ex, "System tray icon initialization failed; startup will continue without it.");
+				SystemTrayIcon = null;
 			}
 		}
 

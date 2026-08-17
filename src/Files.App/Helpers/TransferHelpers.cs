@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
@@ -124,7 +124,7 @@ namespace Files.App.Helpers
 							});
 						}
 
-						var result = listedItem.PrimaryItemAttribute == StorageItemTypes.File || listedItem is ZipItem
+						var result = listedItem.PrimaryItemAttribute == StorageItemTypes.File || listedItem.IsArchive
 								? await context.ShellPage.ShellViewModel.GetFileFromPathAsync(listedItem.ItemPath).OnSuccess(t => items.Add(t))
 								: await context.ShellPage.ShellViewModel.GetFolderFromPathAsync(listedItem.ItemPath).OnSuccess(t => items.Add(t));
 

@@ -3,6 +3,7 @@
 
 using Files.App.ViewModels.Layouts;
 using Microsoft.UI.Xaml.Controls;
+using Windows.Foundation;
 
 namespace Files.App.Views.Layouts
 {
@@ -24,6 +25,10 @@ namespace Files.App.Views.Layouts
 		ListedItem? SelectedItem { get; }
 
 		ItemManipulationModel ItemManipulationModel { get; }
+
+		Point? CaptureScrollPosition();
+
+		void RestoreScrollPosition(Point? position);
 
 		InfoPaneViewModel InfoPaneViewModel { get; }
 
