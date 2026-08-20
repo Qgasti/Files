@@ -32,6 +32,10 @@ namespace Files.App.ViewModels
 	/// </summary>
 	public sealed partial class ShellViewModel : ObservableObject, IDisposable
 	{
+		private const int MaxConcurrentExtendedPropertyLoads = 4;
+
+		private static readonly SemaphoreSlim extendedPropertiesSemaphore = new(MaxConcurrentExtendedPropertyLoads, MaxConcurrentExtendedPropertyLoads);
+
 		private readonly SemaphoreSlim enumFolderSemaphore;
 		private readonly SemaphoreSlim getFileOrFolderSemaphore;
 		private readonly SemaphoreSlim bulkOperationSemaphore;
@@ -1644,6 +1648,7 @@ namespace Files.App.ViewModels
 				return;
 			}
 			var token = itemLoadCts.Token;
+			var extendedPropertiesSemaphoreAcquired = false;
 
 			try
 			{
@@ -1657,6 +1662,10 @@ namespace Files.App.ViewModels
 				requiresCollectionRefresh |= await EnrichArchiveCandidateAsync(item, token);
 				if (requiresCollectionRefresh)
 					ScheduleDeferredItemCollectionRefresh();
+
+				await extendedPropertiesSemaphore.WaitAsync(token);
+				extendedPropertiesSemaphoreAcquired = true;
+
 				var wasSyncStatusLoaded = false;
 				var loadGroupHeaderInfo = false;
 				ImageSource? groupImage = null;
@@ -1857,6 +1866,9 @@ namespace Files.App.ViewModels
 			}
 			finally
 			{
+				if (extendedPropertiesSemaphoreAcquired)
+					extendedPropertiesSemaphore.Release();
+
 				if (itemLoadQueue.TryGetValue(item.ItemPath, out var currentCts) && ReferenceEquals(currentCts, itemLoadCts))
 					itemLoadQueue.TryRemove(item.ItemPath, out _);
 				itemLoadCts.Dispose();

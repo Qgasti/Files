@@ -26,7 +26,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 | Very high | Back navigation | A bounded in-memory snapshot is restored before a background enumeration replaces it with current file-system state. | Restore a recent folder snapshot immediately, then validate it in the background using the directory watcher or a refresh. | Implemented and locally verified |
 | Very high | Enumeration critical path | Generic icon waits, shortcut/URL parsing, file symbolic-link resolution, ZIP association checks, and duplicate Git detection have been removed from Win32 enumeration. | Create basic items from `WIN32_FIND_DATA` first. Defer expensive enrichment, or run bounded enrichment only for visible items. | Implemented; profiling pending |
 | High | UI collection updates | Flat, filtered, and grouped batches use sorted single-item notifications. Final projections use at most 64 Add/Remove/Move operations and fall back to one Reset only for larger or wholly replaced projections. | Extend differential updates while preserving selection, grouping, and layout behavior. | Implemented; grouped refresh verified |
-| High | Extended properties and thumbnails | Realized containers drive enrichment, recycled containers now cancel per-item metadata, retry, and generated-thumbnail work, and thumbnail work runs before lower-priority metadata. Initial Shell calls are bounded and validated thumbnails are persisted. | Split enrichment by priority, cancel work outside the visible range, use bounded concurrency, and persist validated thumbnail results. | Implemented and locally verified |
+| High | Extended properties and thumbnails | Realized containers drive enrichment, recycled containers now cancel per-item metadata, retry, and generated-thumbnail work, and thumbnail work runs before lower-priority metadata. Initial Shell calls and lower-priority metadata are bounded, and validated thumbnails are persisted. | Split enrichment by priority, cancel work outside the visible range, use bounded concurrency, and persist validated thumbnail results. | Implemented and locally verified |
 | Medium | Sorting and grouping | Progressive batches are inserted in final sort order. Group members and group headers are reordered with Move notifications, avoiding a complete Reset for bounded diffs. | Keep the single final sort unless profiling proves incremental ordering is cheaper; avoid an additional full collection reset where possible. | Implemented; grouped refresh verified |
 | High | Watcher modification bursts | Modified paths are deduplicated with a case-insensitive index, matched against one collection snapshot, and refreshed in batches of at most eight concurrent storage-property requests. | Keep watcher queueing and item matching linear while bounding storage and cloud work triggered by large sync, extraction, or build bursts. | Implemented and locally verified |
 
@@ -89,6 +89,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Cancel queued persistent-cache writes when their item leaves the realized range or its folder load is superseded, without faulting fire-and-forget tasks canceled before acquiring the cache I/O semaphore.
 - [x] Limit persistent-cache reads to eight concurrent operations across tabs and propagate cancellation instead of treating a canceled disk read as a cache miss followed by a Shell fallback.
 - [x] Track cache size incrementally under the serialized write lock and perform a full LRU enumeration and sort only when the configured size limit is actually exceeded.
+- [x] Limit lower-priority storage, cloud, tag, and media-property enrichment to four concurrent operations across tabs while allowing each realized item's thumbnail to load first.
 
 ### Phase 6: Watcher reconciliation
 
@@ -177,6 +178,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - A real `Debug|x64` rebuild completed with exit code 0, and its output was exercised through the existing `FilesDev` development package. The main window initialized normally and remained responsive.
 - Returning to the 85-item AppTiles development folder restored its navigation snapshot in 20.3 ms with one selected item. UI Automation confirmed `Logo.ico` remained selected after reconciliation, which completed with zero Reset notifications.
 - A 96-file build-output-style modification burst produced 93 deduplicated watcher metadata paths. The backlog drained continuously in three batches over 993.6 ms with zero remaining paths, no new-event interruption, and a responsive main window.
+- Lower-priority storage, cloud, tag, and media-property enrichment now shares four work slots across tabs. Thumbnail loading remains ahead of this bounded section, and recycled or navigated-away items cancel while waiting for a slot.
+- The bounded metadata-enrichment change completed an isolated-output `Debug|x64` build with exit code 0. The resulting development DLL loaded the 4,911-item System32 folder with an initial batch in 69.9 ms, completed in 2,776.7 ms with zero Reset notifications, and remained responsive when navigating back to a 13-item snapshot.
 
 ## Risks
 
