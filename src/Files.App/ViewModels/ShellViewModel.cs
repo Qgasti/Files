@@ -2992,6 +2992,18 @@ namespace Files.App.ViewModels
 				anyEdits = false;
 			}
 
+			List<string> DequeueUpdateBatch()
+			{
+				var itemsToUpdate = new List<string>(UPDATE_BATCH_SIZE);
+				while (itemsToUpdate.Count < UPDATE_BATCH_SIZE && updateQueue.TryDequeue(out var itemPath))
+				{
+					queuedUpdatePaths.Remove(itemPath);
+					itemsToUpdate.Add(itemPath);
+				}
+
+				return itemsToUpdate;
+			}
+
 			try
 			{
 				while (!cancellationToken.IsCancellationRequested)
@@ -3065,28 +3077,37 @@ namespace Files.App.ViewModels
 								await HandleChangesOccurredAsync();
 						}
 
-						var itemsToUpdate = new List<string>();
-						for (var i = 0; i < UPDATE_BATCH_SIZE && updateQueue.Count > 0; i++)
-						{
-							var itemPath = updateQueue.Dequeue();
-							queuedUpdatePaths.Remove(itemPath);
-							itemsToUpdate.Add(itemPath);
-						}
-
-						await UpdateFilesOrFoldersAsync(itemsToUpdate, hasSyncStatus);
 					}
 
-					if (updateQueue.Count > 0)
+					var updateStartedTimestamp = Stopwatch.GetTimestamp();
+					var updatedPathCount = 0;
+					var updateBatchCount = 0;
+					var interruptedByNewWatcherEvent = false;
+					while (updateQueue.Count > 0 && !cancellationToken.IsCancellationRequested)
 					{
-						var itemsToUpdate = new List<string>();
-						for (var i = 0; i < UPDATE_BATCH_SIZE && updateQueue.Count > 0; i++)
-						{
-							var itemPath = updateQueue.Dequeue();
-							queuedUpdatePaths.Remove(itemPath);
-							itemsToUpdate.Add(itemPath);
-						}
+						var updateBatch = DequeueUpdateBatch();
+						await UpdateFilesOrFoldersAsync(updateBatch, hasSyncStatus);
+						updatedPathCount += updateBatch.Count;
+						updateBatchCount++;
 
-						await UpdateFilesOrFoldersAsync(itemsToUpdate, hasSyncStatus);
+						// Process newly arrived events before continuing a large metadata backlog.
+						if (!operationQueue.IsEmpty)
+						{
+							interruptedByNewWatcherEvent = true;
+							break;
+						}
+					}
+
+					var updateElapsed = Stopwatch.GetElapsedTime(updateStartedTimestamp);
+					if (updatedPathCount > UPDATE_BATCH_SIZE || updateElapsed >= TimeSpan.FromMilliseconds(500))
+					{
+						App.Logger.LogInformation(
+							"Watcher metadata update processed {PathCount} paths in {BatchCount} batches over {ElapsedMs:F1} ms (remaining: {RemainingCount}, interrupted by new watcher event: {Interrupted}).",
+							updatedPathCount,
+							updateBatchCount,
+							updateElapsed.TotalMilliseconds,
+							updateQueue.Count,
+							interruptedByNewWatcherEvent);
 					}
 
 					if (anyEdits && sampler.CheckNow())

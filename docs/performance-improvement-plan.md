@@ -13,6 +13,7 @@ Folder-load instrumentation records the following entries in `debug.log`:
 - Enumeration duration and enumeration provider.
 - Total initial folder-load duration.
 - Cached/icon and generated-thumbnail counts, average duration, and maximum duration.
+- Large watcher metadata burst path counts, batch counts, elapsed time, remaining backlog, and new-event interruptions.
 
 The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does not improve performance by itself.
 
@@ -91,6 +92,8 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Materialize each watcher update's requested paths once and match them against one collection snapshot instead of repeatedly copying and cross-scanning the folder collection.
 - [x] Limit watcher-triggered storage, cloud, and basic-property refreshes to batches of eight concurrent items.
 - [x] Reorder watcher-affected group members and headers with Move notifications, processing only groups marked unsorted instead of issuing a full group order Reset.
+- [x] Drain consecutive metadata batches without an artificial 200 ms wait while yielding at batch boundaries when new watcher events arrive.
+- [x] Log watcher metadata drains larger than 32 items or slower than 500 ms without including file-system paths.
 - [ ] Profile a large OneDrive, extraction, or build-output modification burst in an interactive development package.
 
 ## Verification gates
@@ -159,6 +162,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The combined watcher queue, bounded property refresh, and differential group-ordering changes completed an isolated-output `Debug|x64` build with exit code 0.
 - Group member and header ordering now plans moves from one collection snapshot. Reorders requiring more than 64 moves use one bulk Reset, avoiding both repeated collection copies and an unbounded stream of UI notifications.
 - The bounded grouped-reorder implementation completed an isolated-output `Debug|x64` build with exit code 0 together with the watcher burst changes.
+- Large watcher metadata backlogs now drain continuously in 32-item batches instead of waiting 200 ms between later batches. Newly queued watcher operations interrupt the drain at the next batch boundary so they can be coalesced or prioritized before continuing.
+- The continuous watcher-drain and burst-instrumentation changes completed an isolated-output `Debug|x64` build with exit code 0.
 
 ## Risks
 
