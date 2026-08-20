@@ -12,14 +12,13 @@ namespace Files.App.Services
 	internal sealed class ThumbnailCacheService : IThumbnailCacheService, IDisposable
 	{
 		private const int MaxConcurrentReads = 8;
-		private const int WritesBetweenTrims = 16;
 		private const string CacheFileExtension = ".thumb";
 
 		private readonly IUserSettingsService userSettingsService;
 		private readonly SemaphoreSlim cacheReadSemaphore = new(MaxConcurrentReads, MaxConcurrentReads);
 		private readonly SemaphoreSlim cacheIoSemaphore = new(1, 1);
 		private readonly string cacheDirectory = Path.Combine(ApplicationData.Current.LocalCacheFolder.Path, "Thumbnails");
-		private int writesSinceTrim;
+		private long trackedCacheSize = -1;
 
 		public ThumbnailCacheService(IUserSettingsService userSettingsService)
 		{
@@ -99,6 +98,8 @@ namespace Files.App.Services
 				lockTaken = true;
 				Directory.CreateDirectory(cacheDirectory);
 				var cachePath = GetCachePath(path, pixelSize, modified, fileSize);
+				var existingLength = File.Exists(cachePath) ? new FileInfo(cachePath).Length : 0;
+				var cacheSizeBeforeWrite = GetTrackedCacheSizeCore();
 				var temporaryPath = Path.Combine(cacheDirectory, $"{Guid.NewGuid():N}.tmp");
 
 				try
@@ -112,11 +113,9 @@ namespace Files.App.Services
 						File.Delete(temporaryPath);
 				}
 
-				if (Interlocked.Increment(ref writesSinceTrim) >= WritesBetweenTrims)
-				{
-					Interlocked.Exchange(ref writesSinceTrim, 0);
+				trackedCacheSize = Math.Max(0, cacheSizeBeforeWrite - existingLength + data.LongLength);
+				if (trackedCacheSize > GetCacheSizeLimit())
 					TrimCore();
-				}
 			}
 			catch (OperationCanceledException)
 			{
@@ -137,7 +136,8 @@ namespace Files.App.Services
 			await cacheIoSemaphore.WaitAsync(cancellationToken);
 			try
 			{
-				return EnumerateCacheFiles().Sum(file => file.Length);
+				trackedCacheSize = CalculateCacheSizeCore();
+				return trackedCacheSize;
 			}
 			catch (Exception ex) when (ex is not OperationCanceledException)
 			{
@@ -155,7 +155,8 @@ namespace Files.App.Services
 			await cacheIoSemaphore.WaitAsync(cancellationToken);
 			try
 			{
-				TrimCore();
+				if (GetTrackedCacheSizeCore() > GetCacheSizeLimit())
+					TrimCore();
 			}
 			catch (Exception ex) when (ex is not OperationCanceledException)
 			{
@@ -187,18 +188,22 @@ namespace Files.App.Services
 			}
 			finally
 			{
+				trackedCacheSize = -1;
 				cacheIoSemaphore.Release();
 			}
 		}
 
 		private void TrimCore()
 		{
+			var trimStartedTimestamp = Stopwatch.GetTimestamp();
 			var cacheFiles = EnumerateCacheFiles()
 				.OrderBy(file => file.LastAccessTimeUtc)
 				.ThenBy(file => file.LastWriteTimeUtc)
 				.ToList();
 			var totalSize = cacheFiles.Sum(file => file.Length);
-			var limit = (long)(Math.Clamp(userSettingsService.GeneralSettingsService.ThumbnailCacheSizeLimit, 100d, 5000d) * 1024 * 1024);
+			var initialSize = totalSize;
+			var limit = GetCacheSizeLimit();
+			var removedCount = 0;
 
 			foreach (var file in cacheFiles)
 			{
@@ -208,8 +213,33 @@ namespace Files.App.Services
 				var length = file.Length;
 				file.Delete();
 				totalSize -= length;
+				removedCount++;
+			}
+
+			trackedCacheSize = totalSize;
+			if (removedCount > 0)
+			{
+				App.Logger.LogInformation(
+					"Persistent thumbnail cache trimmed {RemovedCount} entries and {RemovedBytes} bytes in {ElapsedMs:F1} ms.",
+					removedCount,
+					initialSize - totalSize,
+					Stopwatch.GetElapsedTime(trimStartedTimestamp).TotalMilliseconds);
 			}
 		}
+
+		private long GetTrackedCacheSizeCore()
+		{
+			if (trackedCacheSize < 0)
+				trackedCacheSize = CalculateCacheSizeCore();
+
+			return trackedCacheSize;
+		}
+
+		private long CalculateCacheSizeCore()
+			=> EnumerateCacheFiles().Sum(file => file.Length);
+
+		private long GetCacheSizeLimit()
+			=> (long)(Math.Clamp(userSettingsService.GeneralSettingsService.ThumbnailCacheSizeLimit, 100d, 5000d) * 1024 * 1024);
 
 		private IEnumerable<FileInfo> EnumerateCacheFiles()
 		{
