@@ -3115,7 +3115,7 @@ namespace Files.App.ViewModels
 					while (updateQueue.Count > 0 && !cancellationToken.IsCancellationRequested)
 					{
 						var updateBatch = DequeueUpdateBatch();
-						await UpdateFilesOrFoldersAsync(updateBatch, hasSyncStatus);
+						await UpdateFilesOrFoldersAsync(updateBatch, hasSyncStatus, cancellationToken);
 						updatedPathCount += updateBatch.Count;
 						updateBatchCount++;
 
@@ -3266,12 +3266,15 @@ namespace Files.App.ViewModels
 			return null;
 		}
 
-		private async Task UpdateFilesOrFoldersAsync(IEnumerable<string> paths, bool hasSyncStatus)
+		private async Task UpdateFilesOrFoldersAsync(IEnumerable<string> paths, bool hasSyncStatus, CancellationToken cancellationToken)
 		{
 			const int MAX_CONCURRENT_ITEM_UPDATES = 8;
 			var requestedPaths = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
 			if (requestedPaths.Count == 0)
 				return;
+			var folderLoadSource = addFilesCTS;
+			using var updateCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, folderLoadSource.Token);
+			var updateToken = updateCts.Token;
 
 			var itemsNeedingThumbnailRetry = filesAndFolders.ToList()
 				.Where(item => requestedPaths.Contains(item.ItemPath) && item.NeedsDelayedThumbnailLoad);
@@ -3302,9 +3305,10 @@ namespace Files.App.ViewModels
 					.Unwrap();
 			}
 
+			List<ListedItem> matchingItems;
 			try
 			{
-				await enumFolderSemaphore.WaitAsync(semaphoreCTS.Token);
+				await enumFolderSemaphore.WaitAsync(updateToken);
 			}
 			catch (OperationCanceledException)
 			{
@@ -3313,20 +3317,48 @@ namespace Files.App.ViewModels
 
 			try
 			{
-				var matchingItems = filesAndFolders.ToList()
+				if (!ReferenceEquals(addFilesCTS, folderLoadSource))
+					return;
+
+				matchingItems = filesAndFolders.ToList()
 					.Where(item => requestedPaths.Contains(item.ItemPath))
 					.ToList();
-				var results = new List<(ListedItem Item, CloudDriveSyncStatus? SyncStatus, long? Size, DateTimeOffset Created, DateTimeOffset Modified)?>(matchingItems.Count);
-				foreach (var batch in matchingItems.Chunk(MAX_CONCURRENT_ITEM_UPDATES))
-					results.AddRange(await Task.WhenAll(batch.Select(item => GetFileOrFolderUpdateInfoAsync(item, hasSyncStatus))));
+			}
+			finally
+			{
+				enumFolderSemaphore.Release();
+			}
 
+			var results = new List<(ListedItem Item, CloudDriveSyncStatus? SyncStatus, long? Size, DateTimeOffset Created, DateTimeOffset Modified)?>(matchingItems.Count);
+			try
+			{
+				foreach (var batch in matchingItems.Chunk(MAX_CONCURRENT_ITEM_UPDATES))
+				{
+					updateToken.ThrowIfCancellationRequested();
+					results.AddRange(await Task.WhenAll(batch.Select(item => GetFileOrFolderUpdateInfoAsync(item, hasSyncStatus))));
+				}
+
+				updateToken.ThrowIfCancellationRequested();
+				await enumFolderSemaphore.WaitAsync(updateToken);
+			}
+			catch (OperationCanceledException)
+			{
+				return;
+			}
+
+			try
+			{
+				if (!ReferenceEquals(addFilesCTS, folderLoadSource))
+					return;
+
+				var currentItems = new HashSet<ListedItem>(filesAndFolders.ToList(), ReferenceEqualityComparer.Instance);
 				await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 				{
 					var itemsRegrouped = false;
 
 					foreach (var result in results)
 					{
-						if (result is not null)
+						if (result is not null && currentItems.Contains(result.Value.Item))
 						{
 							var item = result.Value.Item;
 							item.ItemDateModifiedReal = result.Value.Modified;

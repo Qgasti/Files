@@ -102,6 +102,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Drain consecutive metadata batches without an artificial 200 ms wait while yielding at batch boundaries when new watcher events arrive.
 - [x] Log watcher metadata drains larger than 32 items or slower than 500 ms without including file-system paths.
 - [x] Profile a 96-file build-output-style modification burst in an interactive development package; the deduplicated 93-path backlog drained in three batches without leaving queued work.
+- [x] Release the folder-enumeration semaphore while reading watcher-triggered storage and cloud properties, cancel obsolete batches on navigation, and validate the folder-load generation before applying results.
 
 ## Verification gates
 
@@ -186,6 +187,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The deduplicated thumbnail-retry change completed an isolated-output `Debug|x64` build with exit code 0. An interactive 48-item test folder loaded its first batch in 80.1 ms and completed in 1,337.0 ms with zero Reset notifications. Twelve invalid PNG files each scheduled and ran exactly one timer retry; replacing them with valid PNG data triggered one watcher debounce per item without another failure or timer cycle, and the window remained responsive.
 - Drive discovery no longer waits for a thumbnail that the sidebar subsequently queried again. Sidebar entries are inserted first, then populate a coalesced per-drive icon task in the background; a preloaded icon also bypasses both Shell fallback calls.
 - On the same interactive account with C, D, W, Y, and Z available, the interval from app launch to the final drive addition fell from about 4.00 seconds to 1.90 seconds. The post-main-window interval fell from about 3.07 seconds to 0.98 seconds. All five drives remained present, each realized sidebar entry exposed its image element, and no background icon-loading exception was recorded.
+- Watcher metadata now holds the enumeration semaphore only while capturing and applying a collection snapshot. Storage and cloud property I/O runs outside the lock with linked watcher and folder-load cancellation, and results apply only to item instances still present in the same load generation.
+- During a 256-file modification burst, navigation began its new folder load about 184 ms after Enter and restored its first snapshot batch about 196 ms after Enter instead of waiting for the metadata drain. A separate 96-file control burst processed 95 deduplicated paths in three batches over 988.9 ms with zero remaining work, proving the non-navigation apply path still completed normally.
 
 ## Risks
 
