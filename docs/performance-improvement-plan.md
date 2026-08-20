@@ -28,7 +28,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 | High | UI collection updates | Flat, filtered, and grouped batches use sorted single-item notifications. Final projections use at most 64 Add/Remove/Move operations and fall back to one Reset only for larger or wholly replaced projections. | Extend differential updates while preserving selection, grouping, and layout behavior. | Implemented; grouped refresh verified |
 | High | Extended properties and thumbnails | Realized containers drive enrichment, recycled containers now cancel per-item metadata, retry, and generated-thumbnail work, and thumbnail work runs before lower-priority metadata. Initial Shell calls are bounded and validated thumbnails are persisted. | Split enrichment by priority, cancel work outside the visible range, use bounded concurrency, and persist validated thumbnail results. | Implemented and locally verified |
 | Medium | Sorting and grouping | Progressive batches are inserted in final sort order. Group members and group headers are reordered with Move notifications, avoiding a complete Reset for bounded diffs. | Keep the single final sort unless profiling proves incremental ordering is cheaper; avoid an additional full collection reset where possible. | Implemented; grouped refresh verified |
-| High | Watcher modification bursts | Modified paths are deduplicated with a case-insensitive index, matched against one collection snapshot, and refreshed in batches of at most eight concurrent storage-property requests. | Keep watcher queueing and item matching linear while bounding storage and cloud work triggered by large sync, extraction, or build bursts. | Implemented; profiling pending |
+| High | Watcher modification bursts | Modified paths are deduplicated with a case-insensitive index, matched against one collection snapshot, and refreshed in batches of at most eight concurrent storage-property requests. | Keep watcher queueing and item matching linear while bounding storage and cloud work triggered by large sync, extraction, or build bursts. | Implemented and locally verified |
 
 ## Existing partial improvements
 
@@ -98,7 +98,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Reorder watcher-affected group members and headers with Move notifications, processing only groups marked unsorted instead of issuing a full group order Reset.
 - [x] Drain consecutive metadata batches without an artificial 200 ms wait while yielding at batch boundaries when new watcher events arrive.
 - [x] Log watcher metadata drains larger than 32 items or slower than 500 ms without including file-system paths.
-- [ ] Profile a large OneDrive, extraction, or build-output modification burst in an interactive development package.
+- [x] Profile a 96-file build-output-style modification burst in an interactive development package; the deduplicated 93-path backlog drained in three batches without leaving queued work.
 
 ## Verification gates
 
@@ -160,8 +160,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 
 - Fixed a selection-snapshot race where navigation captured the outgoing folder's selected items, then the incoming page overwrote that snapshot with its initially empty selection. Selection is now captured only before navigation changes the active content page.
 - The focused isolated-output `Debug|x64` build completed with exit code 0 after the selection-snapshot correction.
-- Interactive verification remains pending because this Windows user does not currently have the required Windows App Runtime 2 framework registered. A separate `FilesCodexSelectionTest` identity avoided the existing `FilesDev` conflict, but registration correctly stopped at the missing per-user framework dependency; no system runtime was installed or changed.
-- Watcher modification bursts now use a case-insensitive path index instead of repeated queue scans, perform two linear collection passes instead of per-path full scans, and limit storage-property refreshes to eight concurrent items. Interactive burst profiling remains pending.
+- Windows App Runtime 2.4 was already registered for the interactive user, so the attempted 2.3.1 runtime installation was correctly rejected as a downgrade and no runtime was installed or changed. The current build launched successfully through the existing `FilesDev` package identity and remained responsive.
+- Watcher modification bursts now use a case-insensitive path index instead of repeated queue scans, perform two linear collection passes instead of per-path full scans, and limit storage-property refreshes to eight concurrent items. Interactive burst profiling is recorded below.
 - Watcher-driven date or size changes that move an item between groups now reuse differential Move ordering; already sorted groups and group headers are skipped.
 - The combined watcher queue, bounded property refresh, and differential group-ordering changes completed an isolated-output `Debug|x64` build with exit code 0.
 - Group member and header ordering now plans moves from one collection snapshot. Reorders requiring more than 64 moves use one bulk Reset, avoiding both repeated collection copies and an unbounded stream of UI notifications.
@@ -174,6 +174,9 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The bounded persistent-thumbnail-read changes completed an isolated-output `Debug|x64` build with exit code 0.
 - Persistent thumbnail writes now update an in-memory size total from the overwritten and replacement file lengths. The previous unconditional full LRU sort after every 16 writes is removed; actual trims log removed entries, released bytes, and elapsed time.
 - The incremental thumbnail-cache size tracking changes completed an isolated-output `Debug|x64` build with exit code 0.
+- A real `Debug|x64` rebuild completed with exit code 0, and its output was exercised through the existing `FilesDev` development package. The main window initialized normally and remained responsive.
+- Returning to the 85-item AppTiles development folder restored its navigation snapshot in 20.3 ms with one selected item. UI Automation confirmed `Logo.ico` remained selected after reconciliation, which completed with zero Reset notifications.
+- A 96-file build-output-style modification burst produced 93 deduplicated watcher metadata paths. The backlog drained continuously in three batches over 993.6 ms with zero remaining paths, no new-event interruption, and a responsive main window.
 
 ## Risks
 
