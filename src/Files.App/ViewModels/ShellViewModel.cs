@@ -44,6 +44,8 @@ namespace Files.App.ViewModels
 		private readonly ConcurrentQueue<(uint Action, string FileName)> operationQueue;
 		private readonly ConcurrentQueue<uint> gitChangesQueue;
 		private readonly ConcurrentDictionary<string, CancellationTokenSource> itemLoadQueue;
+		private readonly Dictionary<string, ListedItem> deferredVisiblePropertyLoads;
+		private readonly object deferredVisiblePropertyLoadsSyncRoot = new();
 		private readonly ConcurrentDictionary<string, CancellationTokenSource> generatedThumbnailLoads;
 		private readonly AsyncManualResetEvent operationEvent;
 		private readonly AsyncManualResetEvent gitChangedEvent;
@@ -728,6 +730,7 @@ namespace Files.App.ViewModels
 			operationQueue = new ConcurrentQueue<(uint Action, string FileName)>();
 			gitChangesQueue = new ConcurrentQueue<uint>();
 			itemLoadQueue = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
+			deferredVisiblePropertyLoads = new Dictionary<string, ListedItem>(StringComparer.OrdinalIgnoreCase);
 			generatedThumbnailLoads = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
 			thumbnailRetryDebounce = new ConcurrentDictionary<string, CancellationTokenSource>();
 			addFilesCTS = new CancellationTokenSource();
@@ -922,6 +925,8 @@ namespace Files.App.ViewModels
 		public void CancelExtendedPropertiesLoading()
 		{
 			CancelDeferredItemCollectionRefresh();
+			lock (deferredVisiblePropertyLoadsSyncRoot)
+				deferredVisiblePropertyLoads.Clear();
 			loadPropsCTS.Cancel();
 			loadPropsCTS = new CancellationTokenSource();
 			foreach (var cts in generatedThumbnailLoads.Values)
@@ -931,6 +936,8 @@ namespace Files.App.ViewModels
 		public void CancelExtendedPropertiesLoadingForItem(ListedItem item)
 		{
 			item.ItemPropertiesInitialized = false;
+			lock (deferredVisiblePropertyLoadsSyncRoot)
+				deferredVisiblePropertyLoads.Remove(item.ItemPath);
 			if (itemLoadQueue.TryGetValue(item.ItemPath, out var itemCts))
 				itemCts.Cancel();
 			if (generatedThumbnailLoads.TryGetValue(item.ItemPath, out var thumbnailCts))
@@ -1413,8 +1420,51 @@ namespace Files.App.ViewModels
 		private bool isLoadingItems = false;
 		public bool IsLoadingItems
 		{
-			get => isLoadingItems;
-			set => isLoadingItems = value;
+			get
+			{
+				lock (deferredVisiblePropertyLoadsSyncRoot)
+					return isLoadingItems;
+			}
+			set
+			{
+				List<ListedItem>? deferredItems = null;
+				lock (deferredVisiblePropertyLoadsSyncRoot)
+				{
+					isLoadingItems = value;
+					if (!value && deferredVisiblePropertyLoads.Count > 0)
+					{
+						deferredItems = deferredVisiblePropertyLoads.Values.ToList();
+						deferredVisiblePropertyLoads.Clear();
+					}
+				}
+
+				if (deferredItems is not null)
+				{
+					foreach (var item in deferredItems)
+						_ = SafetyExtensions.IgnoreExceptions(() => LoadVisibleItemPropertiesCoreAsync(item), App.Logger);
+				}
+			}
+		}
+
+		public Task LoadVisibleItemPropertiesAsync(ListedItem item)
+		{
+			lock (deferredVisiblePropertyLoadsSyncRoot)
+			{
+				if (isLoadingItems)
+				{
+					deferredVisiblePropertyLoads[item.ItemPath] = item;
+					return Task.CompletedTask;
+				}
+			}
+
+			return LoadVisibleItemPropertiesCoreAsync(item);
+		}
+
+		private async Task LoadVisibleItemPropertiesCoreAsync(ListedItem item)
+		{
+			await LoadExtendedItemPropertiesAsync(item);
+			if (EnabledGitProperties is not GitProperties.None && item is IGitItem gitItem)
+				await LoadGitPropertiesAsync(gitItem);
 		}
 
 		private async Task<BitmapImage> GetShieldIcon()
@@ -2458,12 +2508,20 @@ namespace Files.App.ViewModels
 				{
 					await Task.Run(async () =>
 					{
-						List<ListedItem> fileList = await Win32StorageEnumerator.ListEntries(path, hFile, findData, cancellationToken, -1, IsValidGitDirectory, intermediateAction: async (intermediateList) =>
-						{
-							filesAndFolders.AddRange(intermediateList);
-							if (!suppressIntermediateUpdates)
-								await AppendFilesAndFoldersAsync(intermediateList, loadMetrics, cancellationToken);
-						});
+						List<ListedItem> fileList = await Win32StorageEnumerator.ListEntries(
+							path,
+							hFile,
+							findData,
+							cancellationToken,
+							-1,
+							IsValidGitDirectory,
+							intermediateAction: async (intermediateList) =>
+							{
+								filesAndFolders.AddRange(intermediateList);
+								if (!suppressIntermediateUpdates)
+									await AppendFilesAndFoldersAsync(intermediateList, loadMetrics, cancellationToken);
+							},
+							performanceCallback: loadMetrics is null ? null : loadMetrics.RecordWin32Enumeration);
 
 						filesAndFolders.AddRange(fileList);
 						if (!suppressIntermediateUpdates && folderSettings.DirectoryGroupOption == GroupOption.None)

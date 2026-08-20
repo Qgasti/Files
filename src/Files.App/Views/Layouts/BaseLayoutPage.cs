@@ -1168,9 +1168,7 @@ namespace Files.App.Views.Layouts
 					uint callbackPhase = 3;
 					args.RegisterUpdateCallback(callbackPhase, async (s, c) =>
 					{
-						await ParentShellPageInstance!.ShellViewModel.LoadExtendedItemPropertiesAsync(listedItem);
-						if (ParentShellPageInstance.ShellViewModel.EnabledGitProperties is not GitProperties.None && listedItem is IGitItem gitItem)
-							await ParentShellPageInstance.ShellViewModel.LoadGitPropertiesAsync(gitItem);
+						await ParentShellPageInstance!.ShellViewModel.LoadVisibleItemPropertiesAsync(listedItem);
 					});
 				}
 			}

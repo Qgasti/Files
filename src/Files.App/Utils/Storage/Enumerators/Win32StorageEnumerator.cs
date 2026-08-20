@@ -11,6 +11,13 @@ namespace Files.App.Utils.Storage
 {
 	public static class Win32StorageEnumerator
 	{
+		public readonly record struct PerformanceTimings(
+			int ItemCount,
+			long TotalElapsedTicks,
+			long ItemInitializationWaitTicks,
+			long PostProcessingTicks,
+			long IntermediateUpdateWaitTicks);
+
 		private const int MaxConcurrentItemInitializations = 8;
 		private const int MaxIntermediateBatchSize = 128;
 
@@ -26,9 +33,14 @@ namespace Files.App.Utils.Storage
 			CancellationToken cancellationToken,
 			int countLimit,
 			bool isGitRepo,
-			Func<List<ListedItem>, Task> intermediateAction
+			Func<List<ListedItem>, Task> intermediateAction,
+			Action<PerformanceTimings>? performanceCallback = null
 		)
 		{
+			var startedTimestamp = Stopwatch.GetTimestamp();
+			long itemInitializationWaitTicks = 0;
+			long postProcessingTicks = 0;
+			long intermediateUpdateWaitTicks = 0;
 			var sampler = new IntervalSampler(500);
 			var tempList = new List<ListedItem>();
 			var pendingItems = new List<Task<ListedItem>>(MaxConcurrentItemInitializations);
@@ -83,6 +95,12 @@ namespace Files.App.Utils.Storage
 				Win32PInvoke.FindClose(hFile);
 			}
 
+			performanceCallback?.Invoke(new(
+				count,
+				Stopwatch.GetTimestamp() - startedTimestamp,
+				itemInitializationWaitTicks,
+				postProcessingTicks,
+				intermediateUpdateWaitTicks));
 			return tempList;
 
 			async Task ResolvePendingItemsAsync()
@@ -91,10 +109,13 @@ namespace Files.App.Utils.Storage
 					return;
 
 				cancellationToken.ThrowIfCancellationRequested();
+				var initializationStartedTimestamp = Stopwatch.GetTimestamp();
 				var resolvedItems = await Task.WhenAll(pendingItems);
+				itemInitializationWaitTicks += Stopwatch.GetTimestamp() - initializationStartedTimestamp;
 				cancellationToken.ThrowIfCancellationRequested();
 				pendingItems.Clear();
 
+				var postProcessingStartedTimestamp = Stopwatch.GetTimestamp();
 				foreach (var item in resolvedItems)
 				{
 					if (item is null)
@@ -120,6 +141,7 @@ namespace Files.App.Utils.Storage
 					if (countLimit >= 0 && count >= countLimit)
 						break;
 				}
+				postProcessingTicks += Stopwatch.GetTimestamp() - postProcessingStartedTimestamp;
 			}
 
 			async Task PublishIntermediateItemsAsync()
@@ -128,7 +150,9 @@ namespace Files.App.Utils.Storage
 				if (intermediateAction is not null && tempList.Count > 0 &&
 					((!firstBatchPublished && count >= 32) || tempList.Count >= MaxIntermediateBatchSize || sampler.CheckNow()))
 				{
+					var updateStartedTimestamp = Stopwatch.GetTimestamp();
 					await intermediateAction(tempList);
+					intermediateUpdateWaitTicks += Stopwatch.GetTimestamp() - updateStartedTimestamp;
 					cancellationToken.ThrowIfCancellationRequested();
 					tempList.Clear();
 					firstBatchPublished = true;

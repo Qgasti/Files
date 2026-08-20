@@ -77,6 +77,20 @@ namespace Files.App.ViewModels
 					GetElapsedMilliseconds(enumerationStartedTimestamp));
 			}
 
+			public void RecordWin32Enumeration(Win32StorageEnumerator.PerformanceTimings timings)
+			{
+				var measuredTicks = timings.ItemInitializationWaitTicks + timings.PostProcessingTicks + timings.IntermediateUpdateWaitTicks;
+				var remainingTicks = Math.Max(0, timings.TotalElapsedTicks - measuredTicks);
+				App.Logger.LogInformation(
+					"Folder load {CorrelationId} Win32 breakdown for {ItemCount} items: initialization waits {InitializationMs:F1} ms, post-processing {PostProcessingMs:F1} ms, intermediate UI waits {IntermediateUpdateWaitMs:F1} ms, remaining enumeration {RemainingMs:F1} ms.",
+					CorrelationId,
+					timings.ItemCount,
+					TicksToMilliseconds(timings.ItemInitializationWaitTicks),
+					TicksToMilliseconds(timings.PostProcessingTicks),
+					TicksToMilliseconds(timings.IntermediateUpdateWaitTicks),
+					TicksToMilliseconds(remainingTicks));
+			}
+
 			public void RecordSnapshotRestored(int itemCount, int selectedItemCount, TimeSpan age)
 			{
 				RecordFirstBatch(itemCount);
