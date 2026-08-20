@@ -256,8 +256,12 @@ namespace Files.App.ViewModels
 			}
 
 			var gitDetectionStartedTimestamp = Stopwatch.GetTimestamp();
-			var gitDirectory = GitHelpers.GetGitRepositoryPath(WorkingDirectory, pathRoot);
+			var gitPathDetectionStartedTimestamp = Stopwatch.GetTimestamp();
+			var gitDirectory = await Task.Run(() => GitHelpers.GetGitRepositoryPath(value, pathRoot));
+			var gitPathDetectionElapsed = Stopwatch.GetElapsedTime(gitPathDetectionStartedTimestamp);
+			var gitHeadDetectionStartedTimestamp = Stopwatch.GetTimestamp();
 			var gitHead = await GitHelpers.GetRepositoryHead(gitDirectory);
+			var gitHeadDetectionElapsed = Stopwatch.GetElapsedTime(gitHeadDetectionStartedTimestamp);
 			if (!string.Equals(WorkingDirectory, value, StringComparison.OrdinalIgnoreCase))
 				return;
 
@@ -265,9 +269,11 @@ namespace Files.App.ViewModels
 			GitHead = gitHead;
 			IsValidGitDirectory = !string.IsNullOrEmpty(GitHead?.Name);
 			App.Logger.LogInformation(
-				"Git repository detection for {Path} completed in {ElapsedMs:F1} ms (repository: {IsRepository}).",
+				"Git repository detection for {Path} completed in {ElapsedMs:F1} ms (path scan: {PathScanMs:F1} ms, HEAD: {HeadMs:F1} ms, repository: {IsRepository}).",
 				LogPathHelper.GetPathIdentifier(WorkingDirectory),
 				Stopwatch.GetElapsedTime(gitDetectionStartedTimestamp).TotalMilliseconds,
+				gitPathDetectionElapsed.TotalMilliseconds,
+				gitHeadDetectionElapsed.TotalMilliseconds,
 				IsValidGitDirectory);
 
 			_ = UpdateFolderThumbnailImageSource();

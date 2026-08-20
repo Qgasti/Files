@@ -101,12 +101,15 @@ internal sealed partial class LibGit2Service // : IVersionControl
 
 	public async Task<BranchItem[]> GetBranchNames(string? path)
 	{
-		if (string.IsNullOrWhiteSpace(path) || !IsRepoValid(path))
+		if (string.IsNullOrWhiteSpace(path))
 			return [];
 
 		var (result, returnValue) = await DoGitOperationAsync<(GitOperationResult, BranchItem[])>(() =>
 		{
 			var branches = Array.Empty<BranchItem>();
+			if (!IsRepoValid(path))
+				return (GitOperationResult.GenericError, branches);
+
 			var result = GitOperationResult.Success;
 			try
 			{
@@ -133,12 +136,15 @@ internal sealed partial class LibGit2Service // : IVersionControl
 
 	public async Task<BranchItem?> GetRepositoryHead(string? path)
 	{
-		if (string.IsNullOrWhiteSpace(path) || !IsRepoValid(path))
+		if (string.IsNullOrWhiteSpace(path))
 			return null;
 
 		var (_, returnValue) = await DoGitOperationAsync<(GitOperationResult, BranchItem?)>(() =>
 		{
 			BranchItem? head = null;
+			if (!IsRepoValid(path))
+				return (GitOperationResult.GenericError, head);
+
 			try
 			{
 				using var repository = new Repository(path);
@@ -538,16 +544,14 @@ internal sealed partial class LibGit2Service // : IVersionControl
 			ex.Message.Contains("authentication replays", StringComparison.OrdinalIgnoreCase);
 	}
 
-	private static async Task<T?> DoGitOperationAsync<T>(Func<object> payload, bool useSemaphore = false)
+	private static async Task<T?> DoGitOperationAsync<T>(Func<T> payload, bool useSemaphore = false)
 	{
 		if (useSemaphore)
 			await GitOperationSemaphore.WaitAsync();
-		else
-			await Task.Yield();
 
 		try
 		{
-			return (T)payload();
+			return await Task.Run(payload);
 		}
 		finally
 		{

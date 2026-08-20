@@ -60,6 +60,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Reuse the Shell view model's Git result in Win32 enumeration instead of performing the same repository and HEAD detection a second time.
 - [x] Reuse the detected Git HEAD when initializing the status bar, avoid re-reading it for every progressive collection batch, and update it only for a changed repository, Git watcher event, fetch completion, or checkout.
 - [x] Make Git fetch return a tracked task, serialize overlapping fetches, keep fetch work off the UI thread, and clear the shared running state after canceled or failed operations.
+- [x] Run repository path validation, HEAD and branch queries, and pure LibGit2 operation payloads away from the UI thread; record path-scan and HEAD timings separately.
 - [x] Capture one cancellation token per folder load and cap intermediate Win32 batches at 128 items so a superseded load cannot observe a replacement token or monopolize the UI thread with an unbounded batch.
 - [x] Profile the repository root: Git detection completed in 52.1 ms and was reused by enumeration, so a separate deferred item model is not justified by the local measurement. Re-profile unusually large or network-hosted repositories before changing that decision.
 
@@ -203,6 +204,9 @@ Every behavior-changing phase must satisfy all applicable gates:
 - Git fetch now returns a real task, runs blocking LibGit2 work on the thread pool, serializes concurrent requests, and records start, completion, cancellation, and active-operation counts. An interactive fetch completed in 576.5 ms with its active count returning from one to zero and no exception.
 - Navigating from the repository root to its `src` folder initialized the Git context once and emitted one fetch start/finish pair; the second folder reused the same repository context and did not fetch again. Both loads used zero Reset notifications and the window remained responsive.
 - Git detection results are committed only if their requested working directory is still current, preventing a slower obsolete HEAD read from overwriting a newer rapid-navigation context.
+- Git repository path scans, validity checks, HEAD and branch reads, and shared LibGit2 payloads now execute on the thread pool. A cold `src` navigation spent 328.3 ms scanning parent paths and 69.7 ms reading HEAD, while the address-bar action returned in 78.5 ms and the window remained responsive throughout the background detection.
+- A LibGit2 `Repository.Discover` experiment was reverted: it increased the cold path scan from 240.1 ms to 305.9 ms and still used 62.0 ms warm, so the original recursive lookup remains in place with only its execution context changed.
+- During a System32-to-`src` rapid-navigation test, the obsolete System32 load canceled after 416 items with zero Reset notifications. The destination restored its 13-item snapshot in 10.8 ms, retained the correct Git repository context, and remained responsive.
 
 ## Risks
 
