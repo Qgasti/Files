@@ -78,9 +78,11 @@ namespace Files.App.Services
 			if (!userSettingsService.GeneralSettingsService.EnableThumbnailCache || data.Length == 0)
 				return;
 
-			await cacheIoSemaphore.WaitAsync(cancellationToken);
+			var lockTaken = false;
 			try
 			{
+				await cacheIoSemaphore.WaitAsync(cancellationToken);
+				lockTaken = true;
 				Directory.CreateDirectory(cacheDirectory);
 				var cachePath = GetCachePath(path, pixelSize, modified, fileSize);
 				var temporaryPath = Path.Combine(cacheDirectory, $"{Guid.NewGuid():N}.tmp");
@@ -111,7 +113,8 @@ namespace Files.App.Services
 			}
 			finally
 			{
-				cacheIoSemaphore.Release();
+				if (lockTaken)
+					cacheIoSemaphore.Release();
 			}
 		}
 

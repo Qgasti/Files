@@ -85,6 +85,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Limit initial cached-thumbnail, icon, and overlay Shell calls to six concurrent operations while keeping non-cached thumbnail generation serialized.
 - [x] Implement the existing persistent thumbnail-cache settings, size limit, least-recently-used eviction, size reporting, and clear operation.
 - [x] Validate persistent entries by normalized path, requested pixel size, modification timestamp, and file size.
+- [x] Cancel queued persistent-cache writes when their item leaves the realized range or its folder load is superseded, without faulting fire-and-forget tasks canceled before acquiring the cache I/O semaphore.
 
 ### Phase 6: Watcher reconciliation
 
@@ -164,6 +165,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The bounded grouped-reorder implementation completed an isolated-output `Debug|x64` build with exit code 0 together with the watcher burst changes.
 - Large watcher metadata backlogs now drain continuously in 32-item batches instead of waiting 200 ms between later batches. Newly queued watcher operations interrupt the drain at the next batch boundary so they can be coalesced or prioritized before continuing.
 - The continuous watcher-drain and burst-instrumentation changes completed an isolated-output `Debug|x64` build with exit code 0.
+- Persistent thumbnail writes now inherit the item or generated-thumbnail cancellation token. Obsolete writes stop waiting on the serialized cache I/O queue and release their retained image buffers sooner.
+- The cancelable persistent-thumbnail-write changes completed an isolated-output `Debug|x64` build with exit code 0.
 
 ## Risks
 

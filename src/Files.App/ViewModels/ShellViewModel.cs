@@ -1463,7 +1463,7 @@ namespace Files.App.ViewModels
 								cancellationToken);
 
 						if (result is not null && !item.IsFolder)
-							_ = thumbnailCacheService.StoreAsync(item.ItemPath, cachePixelSize, item.ItemDateModifiedReal, item.FileSizeBytes, result);
+							_ = thumbnailCacheService.StoreAsync(item.ItemPath, cachePixelSize, item.ItemDateModifiedReal, item.FileSizeBytes, result, cancellationToken);
 					}
 
 					cancellationToken.ThrowIfCancellationRequested();
@@ -1599,7 +1599,7 @@ namespace Files.App.ViewModels
 						else
 						{
 							if (!item.IsFolder)
-								_ = thumbnailCacheService.StoreAsync(item.ItemPath, cachePixelSize, item.ItemDateModifiedReal, item.FileSizeBytes, generatedResult);
+								_ = thumbnailCacheService.StoreAsync(item.ItemPath, cachePixelSize, item.ItemDateModifiedReal, item.FileSizeBytes, generatedResult, generatedThumbnailToken);
 
 							await dispatcherQueue.EnqueueOrInvokeAsync(async () =>
 							{
