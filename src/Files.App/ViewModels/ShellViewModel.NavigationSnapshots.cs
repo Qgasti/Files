@@ -69,25 +69,6 @@ namespace Files.App.ViewModels
 			}
 		}
 
-		private void UpdateFolderNavigationSnapshotSelection(string? path)
-		{
-			if (!IsFolderNavigationSnapshotEligible(path) ||
-				!ReferenceEquals(ContentPageContext.ShellPage?.ShellViewModel, this))
-			{
-				return;
-			}
-
-			var snapshotKey = GetFolderNavigationSnapshotKey(path);
-			var selectedPaths = ContentPageContext.SelectedItems
-				.Select(item => item.ItemPath)
-				.ToHashSet(StringComparer.OrdinalIgnoreCase);
-			lock (folderNavigationSnapshotsLock)
-			{
-				if (folderNavigationSnapshots.TryGetValue(snapshotKey, out var snapshot))
-					folderNavigationSnapshots[snapshotKey] = snapshot with { SelectedPaths = selectedPaths };
-			}
-		}
-
 		public void UpdateFolderNavigationSnapshotSelection(IReadOnlyList<ListedItem> selectedItems)
 		{
 			var path = WorkingDirectory;

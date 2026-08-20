@@ -2029,8 +2029,6 @@ namespace Files.App.ViewModels
 			var loadCompleted = false;
 			var isFolderNavigation = !string.IsNullOrEmpty(previousDir) &&
 				!path.Equals(previousDir, StringComparison.OrdinalIgnoreCase);
-			if (isFolderNavigation)
-				UpdateFolderNavigationSnapshotSelection(previousDir);
 			IReadOnlySet<string> selectionPathsToRestore = previousDir is null && ReferenceEquals(ContentPageContext.ShellPage?.ShellViewModel, this)
 				? ContentPageContext.SelectedItems.Select(item => item.ItemPath).ToHashSet(StringComparer.OrdinalIgnoreCase)
 				: new HashSet<string>(StringComparer.OrdinalIgnoreCase);

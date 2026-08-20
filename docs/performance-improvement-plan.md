@@ -139,6 +139,12 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The company OneDrive root loaded 8 items with a 74.7 ms first batch and a 1,374.0 ms complete load; the mapped `W:` network root loaded 8 items with a 120.0 ms first batch and a 766.4 ms complete load. Both used zero Reset notifications and remained responsive.
 - `Shell:RecycleBinFolder` loaded 318 items through the StorageFolder provider with a 930.9 ms first batch and a 3,686.0 ms complete load, using zero Reset notifications while the window remained responsive.
 
+### 2026-08-20
+
+- Fixed a selection-snapshot race where navigation captured the outgoing folder's selected items, then the incoming page overwrote that snapshot with its initially empty selection. Selection is now captured only before navigation changes the active content page.
+- The focused isolated-output `Debug|x64` build completed with exit code 0 after the selection-snapshot correction.
+- Interactive verification remains pending because this Windows user does not currently have the required Windows App Runtime 2 framework registered. A separate `FilesCodexSelectionTest` identity avoided the existing `FilesDev` conflict, but registration correctly stopped at the missing per-user framework dependency; no system runtime was installed or changed.
+
 ## Risks
 
 - File-system and Shell data can change between snapshot restoration and reconciliation.
