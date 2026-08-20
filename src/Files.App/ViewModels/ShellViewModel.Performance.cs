@@ -25,7 +25,11 @@ namespace Files.App.ViewModels
 			private int generatedThumbnailSuccessCount;
 			private int incrementalUpdateCount;
 			private int incrementalItemCount;
+			private long incrementalUpdateElapsedTicks;
+			private long incrementalUpdateMaxElapsedTicks;
 			private int resetUpdateCount;
+			private long resetUpdateElapsedTicks;
+			private long resetUpdateMaxElapsedTicks;
 
 			public long LoadId { get; }
 
@@ -119,16 +123,21 @@ namespace Files.App.ViewModels
 				}
 			}
 
-			public void RecordCollectionUpdate(bool incremental, int itemCount)
+			public void RecordCollectionUpdate(bool incremental, int itemCount, long updateStartedTimestamp)
 			{
+				var elapsedTicks = Stopwatch.GetTimestamp() - updateStartedTimestamp;
 				if (incremental)
 				{
 					Interlocked.Increment(ref incrementalUpdateCount);
 					Interlocked.Add(ref incrementalItemCount, itemCount);
+					Interlocked.Add(ref incrementalUpdateElapsedTicks, elapsedTicks);
+					UpdateMaximum(ref incrementalUpdateMaxElapsedTicks, elapsedTicks);
 				}
 				else
 				{
 					Interlocked.Increment(ref resetUpdateCount);
+					Interlocked.Add(ref resetUpdateElapsedTicks, elapsedTicks);
+					UpdateMaximum(ref resetUpdateMaxElapsedTicks, elapsedTicks);
 				}
 			}
 
@@ -137,18 +146,24 @@ namespace Files.App.ViewModels
 				var firstBatch = Volatile.Read(ref firstBatchTimestamp);
 				var initialCount = Volatile.Read(ref thumbnailCount);
 				var generatedCount = Volatile.Read(ref generatedThumbnailCount);
+				var incrementalCount = Volatile.Read(ref incrementalUpdateCount);
+				var resetCount = Volatile.Read(ref resetUpdateCount);
 
 				App.Logger.LogInformation(
-					"Folder load {CorrelationId} completed for {Path} in {ElapsedMs:F1} ms (success: {Succeeded}, items: {ItemCount}, first UI batch: {FirstBatchMs:F1} ms, incremental UI updates/affected items: {IncrementalUpdateCount}/{IncrementalItemCount}, reset UI updates: {ResetUpdateCount}, cached/icon thumbnails: {ThumbnailSuccessCount}/{ThumbnailCount} ({PersistentThumbnailHitCount} persistent), avg/max: {ThumbnailAverageMs:F1}/{ThumbnailMaxMs:F1} ms, generated thumbnails: {GeneratedSuccessCount}/{GeneratedCount}, avg/max: {GeneratedAverageMs:F1}/{GeneratedMaxMs:F1} ms).",
+					"Folder load {CorrelationId} completed for {Path} in {ElapsedMs:F1} ms (success: {Succeeded}, items: {ItemCount}, first UI batch: {FirstBatchMs:F1} ms, incremental UI updates/affected items: {IncrementalUpdateCount}/{IncrementalItemCount}, avg/max: {IncrementalUpdateAverageMs:F1}/{IncrementalUpdateMaxMs:F1} ms, reset UI updates: {ResetUpdateCount}, avg/max: {ResetUpdateAverageMs:F1}/{ResetUpdateMaxMs:F1} ms, cached/icon thumbnails: {ThumbnailSuccessCount}/{ThumbnailCount} ({PersistentThumbnailHitCount} persistent), avg/max: {ThumbnailAverageMs:F1}/{ThumbnailMaxMs:F1} ms, generated thumbnails: {GeneratedSuccessCount}/{GeneratedCount}, avg/max: {GeneratedAverageMs:F1}/{GeneratedMaxMs:F1} ms).",
 					CorrelationId,
 					PathIdentifier,
 					GetElapsedMilliseconds(startedTimestamp),
 					succeeded,
 					itemCount,
 					firstBatch == 0 ? -1d : GetElapsedMilliseconds(startedTimestamp, firstBatch),
-					Volatile.Read(ref incrementalUpdateCount),
+					incrementalCount,
 					Volatile.Read(ref incrementalItemCount),
-					Volatile.Read(ref resetUpdateCount),
+					GetAverageMilliseconds(Volatile.Read(ref incrementalUpdateElapsedTicks), incrementalCount),
+					TicksToMilliseconds(Volatile.Read(ref incrementalUpdateMaxElapsedTicks)),
+					resetCount,
+					GetAverageMilliseconds(Volatile.Read(ref resetUpdateElapsedTicks), resetCount),
+					TicksToMilliseconds(Volatile.Read(ref resetUpdateMaxElapsedTicks)),
 					Volatile.Read(ref thumbnailSuccessCount),
 					initialCount,
 					Volatile.Read(ref persistentThumbnailHitCount),

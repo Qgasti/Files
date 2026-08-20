@@ -1092,6 +1092,7 @@ namespace Files.App.ViewModels
 						{
 							if (cancellationToken.IsCancellationRequested)
 								return;
+							var collectionUpdateStartedTimestamp = Stopwatch.GetTimestamp();
 
 							var comparer = SortingHelper.GetComparer(
 								folderSettings.DirectorySortOption,
@@ -1109,7 +1110,7 @@ namespace Files.App.ViewModels
 							if (folderSettings.DirectoryGroupOption != GroupOption.None)
 								OrderGroupsWithMoves();
 
-							loadMetrics?.RecordCollectionUpdate(incremental: true, visibleNewItems.Count);
+							loadMetrics?.RecordCollectionUpdate(incremental: true, visibleNewItems.Count, collectionUpdateStartedTimestamp);
 							loadMetrics?.RecordFirstBatch(FilesAndFolders.Count);
 							UpdateEmptyTextType();
 							UpdateNetworkAvailabilityInfoBar();
@@ -1167,6 +1168,7 @@ namespace Files.App.ViewModels
 						{
 							if (cancellationToken.IsCancellationRequested)
 								return;
+							var collectionUpdateStartedTimestamp = Stopwatch.GetTimestamp();
 
 							IReadOnlySet<string> selectedPaths = ReferenceEquals(ContentPageContext.ShellPage?.ShellViewModel, this)
 								? ContentPageContext.SelectedItems.Select(item => item.ItemPath).ToHashSet(StringComparer.OrdinalIgnoreCase)
@@ -1192,13 +1194,13 @@ namespace Files.App.ViewModels
 							if (appliedDifferentialUpdate)
 							{
 								if (differentialOperationCount > 0)
-									loadMetrics?.RecordCollectionUpdate(incremental: true, differentialOperationCount);
+									loadMetrics?.RecordCollectionUpdate(incremental: true, differentialOperationCount, collectionUpdateStartedTimestamp);
 							}
 							else
 							{
 								// Large diffs still use one Reset notification.
 								FilesAndFolders.EndBulkOperation();
-								loadMetrics?.RecordCollectionUpdate(incremental: false, FilesAndFolders.Count);
+								loadMetrics?.RecordCollectionUpdate(incremental: false, FilesAndFolders.Count, collectionUpdateStartedTimestamp);
 							}
 
 							if (selectedPaths.Count > 0)
