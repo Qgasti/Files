@@ -16,6 +16,7 @@ internal sealed partial class LibGit2Service // : IVersionControl
 	private const int MAX_NUMBER_OF_BRANCHES = 30;
 
 	private static readonly SemaphoreSlim GitOperationSemaphore = new(1, 1);
+	private static readonly SemaphoreSlim GitFetchSemaphore = new(1, 1);
 	private static readonly FetchOptions _fetchOptions = new() { Prune = true };
 	private static readonly PullOptions _pullOptions = new();
 	private static readonly string _clientId = AppLifecycleHelper.AppEnvironment is AppEnvironment.Dev
@@ -23,6 +24,8 @@ internal sealed partial class LibGit2Service // : IVersionControl
 		: CLIENT_ID_SECRET;
 
 	private bool _isExecutingGitAction;
+	private int _activeFetchOperations;
+	private int _pendingFetchCompletionNotification;
 
 	private static readonly StatusCenterViewModel StatusCenterViewModel = Ioc.Default.GetRequiredService<StatusCenterViewModel>();
 	private static readonly ILogger _logger = Ioc.Default.GetRequiredService<ILogger<App>>();
@@ -335,70 +338,111 @@ internal sealed partial class LibGit2Service // : IVersionControl
 			branch.FriendlyName.Equals(branchName, StringComparison.OrdinalIgnoreCase));
 	}
 
-	public async void FetchOrigin(string? repositoryPath, CancellationToken cancellationToken = default)
+	public async Task FetchOriginAsync(string? repositoryPath, CancellationToken cancellationToken = default)
 	{
 		if (string.IsNullOrWhiteSpace(repositoryPath))
 			return;
 
-		using var repository = new Repository(repositoryPath);
-		var signature = repository.Config.BuildSignature(DateTimeOffset.Now);
-
-		var token = CredentialsHelpers.GetPassword(GIT_RESOURCE_NAME, GIT_RESOURCE_USERNAME);
-		if (signature is not null && !string.IsNullOrWhiteSpace(token))
+		var fetchStartedTimestamp = Stopwatch.GetTimestamp();
+		var activeFetchOperations = Interlocked.Increment(ref _activeFetchOperations);
+		_logger.LogInformation(
+			"Git fetch started for {RepositoryPath}; active operations: {ActiveOperations}.",
+			LogPathHelper.GetPathIdentifier(repositoryPath),
+			activeFetchOperations);
+		if (activeFetchOperations == 1)
 		{
-			_fetchOptions.CredentialsProvider = (url, user, cred)
-				=> new UsernamePasswordCredentials
-				{
-					Username = signature.Name,
-					Password = token
-				};
+			MainWindow.Instance.DispatcherQueue.TryEnqueue(() =>
+			{
+				IsExecutingGitAction = true;
+			});
 		}
 
-		MainWindow.Instance.DispatcherQueue.TryEnqueue(() =>
+		var completedSuccessfully = false;
+		var fetchSemaphoreAcquired = false;
+		try
 		{
-			IsExecutingGitAction = true;
-		});
-
-		await DoGitOperationAsync<GitOperationResult>(() =>
-		{
-			var result = GitOperationResult.Success;
-
-			foreach (var remote in repository.Network.Remotes)
+			await GitFetchSemaphore.WaitAsync(cancellationToken);
+			fetchSemaphoreAcquired = true;
+			await Task.Run(() =>
 			{
-				if (cancellationToken.IsCancellationRequested)
-					return result;
+				using var repository = new Repository(repositoryPath);
+				var signature = repository.Config.BuildSignature(DateTimeOffset.Now);
 
-				try
+				var token = CredentialsHelpers.GetPassword(GIT_RESOURCE_NAME, GIT_RESOURCE_USERNAME);
+				if (signature is not null && !string.IsNullOrWhiteSpace(token))
 				{
-					LibGit2Sharp.Commands.Fetch(
-						repository,
-						remote.Name,
-						remote.FetchRefSpecs.Select(rs => rs.Specification),
-						_fetchOptions,
-						"git fetch updated a ref");
+					_fetchOptions.CredentialsProvider = (url, user, cred)
+						=> new UsernamePasswordCredentials
+						{
+							Username = signature.Name,
+							Password = token
+						};
 				}
-				catch (Exception ex)
+
+				var result = GitOperationResult.Success;
+
+				foreach (var remote in repository.Network.Remotes)
 				{
-					// An unreachable remote (e.g. a deleted fork answering 401) must not prevent fetching the remaining remotes
-					_logger.LogWarning(ex, "Failed to fetch remote {RemoteName} in {RepositoryPath}", remote.Name, repositoryPath);
+					if (cancellationToken.IsCancellationRequested)
+						return result;
 
-					if (IsAuthorizationException(ex))
-						result = GitOperationResult.AuthorizationError;
+					try
+					{
+						LibGit2Sharp.Commands.Fetch(
+							repository,
+							remote.Name,
+							remote.FetchRefSpecs.Select(rs => rs.Specification),
+							_fetchOptions,
+							"git fetch updated a ref");
+					}
+					catch (Exception ex)
+					{
+						// An unreachable remote (e.g. a deleted fork answering 401) must not prevent fetching the remaining remotes
+						_logger.LogWarning(ex, "Failed to fetch remote {RemoteName} in {RepositoryPath}", remote.Name, LogPathHelper.GetPathIdentifier(repositoryPath));
+
+						if (IsAuthorizationException(ex))
+							result = GitOperationResult.AuthorizationError;
+					}
 				}
-			}
 
-			return result;
-		});
-
-		MainWindow.Instance.DispatcherQueue.TryEnqueue(() =>
+				return result;
+			});
+			completedSuccessfully = true;
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 		{
-			if (cancellationToken.IsCancellationRequested)
-				// Do nothing because the operation was cancelled and another fetch may be in progress
-				return;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "Failed to fetch repository {RepositoryPath}", LogPathHelper.GetPathIdentifier(repositoryPath));
+		}
+		finally
+		{
+			if (fetchSemaphoreAcquired)
+				GitFetchSemaphore.Release();
 
-			IsExecutingGitAction = false;
-			GitFetchCompleted?.Invoke(null, EventArgs.Empty);
-		});
+			if (completedSuccessfully && !cancellationToken.IsCancellationRequested)
+				Interlocked.Exchange(ref _pendingFetchCompletionNotification, 1);
+
+			activeFetchOperations = Interlocked.Decrement(ref _activeFetchOperations);
+			_logger.LogInformation(
+				"Git fetch finished for {RepositoryPath} in {ElapsedMs:F1} ms (successful: {Successful}, canceled: {Canceled}, active operations: {ActiveOperations}).",
+				LogPathHelper.GetPathIdentifier(repositoryPath),
+				Stopwatch.GetElapsedTime(fetchStartedTimestamp).TotalMilliseconds,
+				completedSuccessfully,
+				cancellationToken.IsCancellationRequested,
+				activeFetchOperations);
+			if (activeFetchOperations == 0)
+			{
+				var raiseCompletion = Interlocked.Exchange(ref _pendingFetchCompletionNotification, 0) == 1;
+				MainWindow.Instance.DispatcherQueue.TryEnqueue(() =>
+				{
+					IsExecutingGitAction = false;
+					if (raiseCompletion)
+						GitFetchCompleted?.Invoke(null, EventArgs.Empty);
+				});
+			}
+		}
 	}
 
 	private static bool IsRepoValid(string path)

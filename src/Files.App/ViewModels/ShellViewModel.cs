@@ -196,6 +196,8 @@ namespace Files.App.ViewModels
 
 		public string? GitDirectory { get; private set; }
 
+		public BranchItem? GitHead { get; private set; }
+
 		public bool IsValidGitDirectory { get; private set; }
 
 		public List<IniSectionDataItem> DesktopIni { get; private set; }
@@ -254,8 +256,14 @@ namespace Files.App.ViewModels
 			}
 
 			var gitDetectionStartedTimestamp = Stopwatch.GetTimestamp();
-			GitDirectory = GitHelpers.GetGitRepositoryPath(WorkingDirectory, pathRoot);
-			IsValidGitDirectory = !string.IsNullOrEmpty((await GitHelpers.GetRepositoryHead(GitDirectory))?.Name);
+			var gitDirectory = GitHelpers.GetGitRepositoryPath(WorkingDirectory, pathRoot);
+			var gitHead = await GitHelpers.GetRepositoryHead(gitDirectory);
+			if (!string.Equals(WorkingDirectory, value, StringComparison.OrdinalIgnoreCase))
+				return;
+
+			GitDirectory = gitDirectory;
+			GitHead = gitHead;
+			IsValidGitDirectory = !string.IsNullOrEmpty(GitHead?.Name);
 			App.Logger.LogInformation(
 				"Git repository detection for {Path} completed in {ElapsedMs:F1} ms (repository: {IsRepository}).",
 				LogPathHelper.GetPathIdentifier(WorkingDirectory),

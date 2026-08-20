@@ -24,6 +24,8 @@ namespace Files.App.Views.Shells
 		private Task _gitFetch = Task.CompletedTask;
 
 		private CancellationTokenSource _gitFetchToken = new CancellationTokenSource();
+		private BranchItem? _gitHead;
+		private StatusBarViewModel? _gitStatusTarget;
 
 		public static readonly DependencyProperty NavParamsProperty =
 			DependencyProperty.Register(
@@ -88,6 +90,7 @@ namespace Files.App.Views.Shells
 						_ContentPage.StatusBarViewModel.CheckoutRequested -= GitCheckout_Required;
 
 					_ContentPage = value;
+					_gitStatusTarget = null;
 
 					NotifyPropertyChanged(nameof(ContentPage));
 					NotifyPropertyChanged(nameof(SlimContentPage));
@@ -250,24 +253,24 @@ namespace Files.App.Views.Shells
 			ContentPage.ItemManipulationModel.SetSelectedItems(e);
 		}
 
-		protected async void FilesystemViewModel_DirectoryInfoUpdated(object sender, EventArgs e)
+		protected void FilesystemViewModel_DirectoryInfoUpdated(object sender, EventArgs e)
 		{
 			if (ContentPage is null)
 				return;
 
 			var directoryItemCountLocalization = Strings.Items.GetLocalizedFormatResource(ShellViewModel.FilesAndFolders.Count);
+			var gitContextChanged =
+				!string.Equals(InstanceViewModel.GitRepositoryPath, ShellViewModel.GitDirectory, StringComparison.OrdinalIgnoreCase) ||
+				InstanceViewModel.IsGitRepository != ShellViewModel.IsValidGitDirectory;
 
-			BranchItem? headBranch = headBranch = InstanceViewModel.IsGitRepository
-					? await GitHelpers.GetRepositoryHead(InstanceViewModel.GitRepositoryPath)
-					: null;
-
-			if (InstanceViewModel.GitRepositoryPath != ShellViewModel.GitDirectory)
+			if (gitContextChanged)
 			{
 				InstanceViewModel.GitRepositoryPath = ShellViewModel.GitDirectory;
 				InstanceViewModel.IsGitRepository = ShellViewModel.IsValidGitDirectory;
+				_gitHead = ShellViewModel.GitHead;
 
-				InstanceViewModel.GitBranchName = headBranch is not null
-					? headBranch.Name
+				InstanceViewModel.GitBranchName = _gitHead is not null
+					? _gitHead.Name
 					: string.Empty;
 
 				var isGitFetchCanceled = false;
@@ -279,9 +282,8 @@ namespace Files.App.Views.Shells
 				}
 				if (InstanceViewModel.IsGitRepository && (!GitHelpers.IsExecutingGitAction || isGitFetchCanceled))
 				{
-					_gitFetch = Task.Run(
-						() => GitHelpers.FetchOrigin(InstanceViewModel.GitRepositoryPath, _gitFetchToken.Token),
-						_gitFetchToken.Token);
+					var repositoryPath = InstanceViewModel.GitRepositoryPath;
+					_gitFetch = GitHelpers.FetchOriginAsync(repositoryPath, _gitFetchToken.Token);
 				}
 			}
 
@@ -289,12 +291,14 @@ namespace Files.App.Views.Shells
 			if (contentPage is null)
 				return;
 
-			if (!GitHelpers.IsExecutingGitAction)
+			if (!GitHelpers.IsExecutingGitAction &&
+				(gitContextChanged || !ReferenceEquals(_gitStatusTarget, contentPage.StatusBarViewModel)))
 			{
 				contentPage.StatusBarViewModel.UpdateGitInfo(
 					InstanceViewModel.IsGitRepository,
 					InstanceViewModel.GitRepositoryPath,
-					headBranch);
+					_gitHead);
+				_gitStatusTarget = contentPage.StatusBarViewModel;
 			}
 
 			contentPage.StatusBarViewModel.DirectoryItemCount = $"{ShellViewModel.FilesAndFolders.Count} {directoryItemCountLocalization}";
@@ -307,18 +311,25 @@ namespace Files.App.Views.Shells
 			if (GitHelpers.IsExecutingGitAction)
 				return;
 
-			var head = InstanceViewModel.IsGitRepository
-				? await GitHelpers.GetRepositoryHead(InstanceViewModel.GitRepositoryPath)
+			var repositoryPath = InstanceViewModel.GitRepositoryPath;
+			var isGitRepository = InstanceViewModel.IsGitRepository;
+			var head = isGitRepository
+				? await GitHelpers.GetRepositoryHead(repositoryPath)
 				: null;
+			if (!string.Equals(repositoryPath, InstanceViewModel.GitRepositoryPath, StringComparison.OrdinalIgnoreCase) ||
+				isGitRepository != InstanceViewModel.IsGitRepository)
+			{
+				return;
+			}
 
+			_gitHead = head;
 			InstanceViewModel.GitBranchName = head is not null
 				? head.Name
 				: string.Empty;
 
-			ContentPage?.StatusBarViewModel.UpdateGitInfo(
-				InstanceViewModel.IsGitRepository,
-				InstanceViewModel.GitRepositoryPath,
-				head);
+			var statusBarViewModel = ContentPage?.StatusBarViewModel;
+			statusBarViewModel?.UpdateGitInfo(isGitRepository, repositoryPath, head);
+			_gitStatusTarget = statusBarViewModel;
 		}
 
 		protected async void GitCheckout_Required(object? sender, string branchName)
@@ -330,10 +341,18 @@ namespace Files.App.Views.Shells
 			}
 			else
 			{
+				var repositoryPath = InstanceViewModel.GitRepositoryPath;
+				var head = await GitHelpers.GetRepositoryHead(repositoryPath);
+				if (!string.Equals(repositoryPath, InstanceViewModel.GitRepositoryPath, StringComparison.OrdinalIgnoreCase))
+					return;
+
+				_gitHead = head;
+				InstanceViewModel.GitBranchName = head?.Name ?? string.Empty;
 				ContentPage.StatusBarViewModel.UpdateGitInfo(
 					InstanceViewModel.IsGitRepository,
-					InstanceViewModel.GitRepositoryPath,
-					await GitHelpers.GetRepositoryHead(InstanceViewModel.GitRepositoryPath));
+					repositoryPath,
+					head);
+				_gitStatusTarget = ContentPage.StatusBarViewModel;
 			}
 		}
 
