@@ -9,6 +9,22 @@ namespace Files.App.ViewModels
 	{
 		private const int MaxDifferentialCollectionOperations = 64;
 
+		private static int FindSortedInsertionIndex(IList<ListedItem> items, ListedItem item, IComparer<ListedItem> comparer)
+		{
+			var lowerBound = 0;
+			var upperBound = items.Count;
+			while (lowerBound < upperBound)
+			{
+				var middle = lowerBound + ((upperBound - lowerBound) / 2);
+				if (comparer.Compare(items[middle], item) <= 0)
+					lowerBound = middle + 1;
+				else
+					upperBound = middle;
+			}
+
+			return lowerBound;
+		}
+
 		private bool TryApplyFlatCollectionDiff(IReadOnlyList<ListedItem> targetItems, out int operationCount)
 		{
 			var currentItems = FilesAndFolders.ToList();

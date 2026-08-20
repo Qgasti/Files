@@ -1093,18 +1093,17 @@ namespace Files.App.ViewModels
 							if (cancellationToken.IsCancellationRequested)
 								return;
 
-							var newItemSet = new HashSet<ListedItem>(visibleNewItems, ReferenceEqualityComparer.Instance);
-							var orderedItems = SortingHelper.OrderFileList(
-								FilesAndFolders.Concat(visibleNewItems).ToList(),
+							var comparer = SortingHelper.GetComparer(
 								folderSettings.DirectorySortOption,
 								folderSettings.DirectorySortDirection,
 								folderSettings.SortDirectoriesAlongsideFiles,
-								folderSettings.SortFilesFirst).ToList();
+								folderSettings.SortFilesFirst);
+							var orderedNewItems = visibleNewItems.OrderBy(item => item, comparer);
 
-							for (var index = 0; index < orderedItems.Count; index++)
+							foreach (var item in orderedNewItems)
 							{
-								if (newItemSet.Contains(orderedItems[index]))
-									FilesAndFolders.Insert(index, orderedItems[index]);
+								var index = FindSortedInsertionIndex(FilesAndFolders, item, comparer);
+								FilesAndFolders.Insert(index, item);
 							}
 
 							if (folderSettings.DirectoryGroupOption != GroupOption.None)
