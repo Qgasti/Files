@@ -14,6 +14,8 @@ namespace Files.App.Data.Items
 {
 	public sealed partial class DriveItem : ExpandableSidebarItemBase, INavigationControlItem, IFolder, IExpandableSidebarFolder
 	{
+		private readonly SemaphoreSlim thumbnailLoadSemaphore = new(1, 1);
+
 		private BitmapImage icon;
 		public BitmapImage Icon
 		{
@@ -356,29 +358,41 @@ namespace Files.App.Data.Items
 
 		public async Task LoadThumbnailAsync()
 		{
-			if (!string.IsNullOrEmpty(DeviceID) && !string.Equals(DeviceID, "network-folder"))
+			if (Icon is not null)
+				return;
+
+			await thumbnailLoadSemaphore.WaitAsync();
+			try
 			{
-				var result = await FileThumbnailHelper.GetIconAsync(
-					DeviceID,
-					Constants.ShellIconSizes.Small,
-					false,
-					IconOptions.ReturnIconOnly | IconOptions.UseCurrentScale);
+				if (Icon is not null)
+					return;
 
-				IconData ??= result;
+				if (IconData is null && !string.IsNullOrEmpty(DeviceID) && !string.Equals(DeviceID, "network-folder"))
+				{
+					IconData = await FileThumbnailHelper.GetIconAsync(
+						DeviceID,
+						Constants.ShellIconSizes.Small,
+						false,
+						IconOptions.ReturnIconOnly | IconOptions.UseCurrentScale);
+				}
+
+				if (IconData is null && Root is not null)
+				{
+					using var thumbnail = await DriveHelpers.GetThumbnailAsync(Root);
+					IconData = thumbnail is not null ? await thumbnail.ToByteArrayAsync() : null;
+				}
+
+				if (string.Equals(DeviceID, "network-folder"))
+					IconData ??= UIHelpers.GetSidebarIconResourceInfo(Constants.ImageRes.Network)?.IconData;
+
+				IconData ??= UIHelpers.GetSidebarIconResourceInfo(Constants.ImageRes.Folder)?.IconData;
+
+				Icon = IconData is not null ? await IconData.ToBitmapAsync() : null;
 			}
-
-			if (Root is not null)
+			finally
 			{
-				using var thumbnail = await DriveHelpers.GetThumbnailAsync(Root);
-				IconData ??= thumbnail is not null ? await thumbnail.ToByteArrayAsync() : null;
+				thumbnailLoadSemaphore.Release();
 			}
-
-			if (string.Equals(DeviceID, "network-folder"))
-				IconData ??= UIHelpers.GetSidebarIconResourceInfo(Constants.ImageRes.Network)?.IconData;
-
-			IconData ??= UIHelpers.GetSidebarIconResourceInfo(Constants.ImageRes.Folder)?.IconData;
-
-			Icon ??= IconData is not null ? await IconData.ToBitmapAsync() : null;
 		}
 
 		private string GetSizeString()

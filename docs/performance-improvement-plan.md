@@ -51,6 +51,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 
 - [x] Bound drive discovery so an unavailable network drive cannot freeze startup.
 - [x] Record skipped or timed-out drives in `debug.log`.
+- [x] Remove drive-thumbnail retrieval from startup discovery, load sidebar drive icons after insertion, and coalesce duplicate icon requests for the same drive.
 - [x] Stop awaiting generic icon lookup for every item during enumeration; visible containers load their icon or thumbnail through the existing enrichment callback.
 - [x] Resolve Win32 item types in batches with at most eight concurrent initializations while preserving enumeration order, cancellation, the first 32-item publication threshold, ADS handling, and folder-size updates.
 - [x] Confirm the Win32 first-pass display-name lookup only reads the process-local `StorageCacheService` dictionary and falls back to the raw file-system name; it performs no Shell or disk I/O.
@@ -183,6 +184,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The bounded metadata-enrichment change completed an isolated-output `Debug|x64` build with exit code 0. The resulting development DLL loaded the 4,911-item System32 folder with an initial batch in 69.9 ms, completed in 2,776.7 ms with zero Reset notifications, and remained responsive when navigating back to a 13-item snapshot.
 - Thumbnail-only retries no longer repeat icon-overlay Shell queries. A cloud retry also leaves an active generated-thumbnail request or existing timer retry in place instead of canceling and replacing it, and its delayed task observes navigation cancellation.
 - The deduplicated thumbnail-retry change completed an isolated-output `Debug|x64` build with exit code 0. An interactive 48-item test folder loaded its first batch in 80.1 ms and completed in 1,337.0 ms with zero Reset notifications. Twelve invalid PNG files each scheduled and ran exactly one timer retry; replacing them with valid PNG data triggered one watcher debounce per item without another failure or timer cycle, and the window remained responsive.
+- Drive discovery no longer waits for a thumbnail that the sidebar subsequently queried again. Sidebar entries are inserted first, then populate a coalesced per-drive icon task in the background; a preloaded icon also bypasses both Shell fallback calls.
+- On the same interactive account with C, D, W, Y, and Z available, the interval from app launch to the final drive addition fell from about 4.00 seconds to 1.90 seconds. The post-main-window interval fell from about 3.07 seconds to 0.98 seconds. All five drives remained present, each realized sidebar entry exposed its image element, and no background icon-loading exception was recorded.
 
 ## Risks
 

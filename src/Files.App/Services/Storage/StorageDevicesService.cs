@@ -75,12 +75,8 @@ namespace Files.App.Services
 					return null;
 				}
 
-				cancellationToken.ThrowIfCancellationRequested();
-				using var thumbnail = await DriveHelpers.GetThumbnailAsync(res.Result);
-				cancellationToken.ThrowIfCancellationRequested();
-
 				var type = DriveHelpers.GetDriveType(drive);
-				var driveItem = await DriveItem.CreateFromPropertiesAsync(res.Result, drive.Name.TrimEnd('\\'), driveLabel, type, thumbnail);
+				var driveItem = await DriveItem.CreateFromPropertiesAsync(res.Result, drive.Name.TrimEnd('\\'), driveLabel, type);
 
 				App.Logger.LogInformation($"Drive added: {driveItem.Path}, {driveItem.Type}");
 				return driveItem;

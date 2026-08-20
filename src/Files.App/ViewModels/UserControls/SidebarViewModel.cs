@@ -477,7 +477,7 @@ namespace Files.App.ViewModels.UserControls
 					if (!section.ChildItems.Any(x => x.Path == drive.Path))
 					{
 						section.ChildItems.Insert(index < 0 ? section.ChildItems.Count : Math.Min(index, section.ChildItems.Count), drive);
-						await drive.LoadThumbnailAsync();
+						_ = SafetyExtensions.IgnoreExceptions(drive.LoadThumbnailAsync, App.Logger);
 					}
 				}
 				else
@@ -491,7 +491,7 @@ namespace Files.App.ViewModels.UserControls
 						int position = paths.IndexOf(drivePath);
 
 						section.ChildItems.Insert(position, drive);
-						await drive.LoadThumbnailAsync();
+						_ = SafetyExtensions.IgnoreExceptions(drive.LoadThumbnailAsync, App.Logger);
 					}
 				}
 			}
