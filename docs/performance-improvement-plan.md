@@ -90,6 +90,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Limit persistent-cache reads to eight concurrent operations across tabs and propagate cancellation instead of treating a canceled disk read as a cache miss followed by a Shell fallback.
 - [x] Track cache size incrementally under the serialized write lock and perform a full LRU enumeration and sort only when the configured size limit is actually exceeded.
 - [x] Limit lower-priority storage, cloud, tag, and media-property enrichment to four concurrent operations across tabs while allowing each realized item's thumbnail to load first.
+- [x] Prevent cloud thumbnail retries from replacing an active generated-thumbnail request or overlapping an existing timer retry, and avoid repeating icon-overlay Shell queries on thumbnail-only retries.
 
 ### Phase 6: Watcher reconciliation
 
@@ -180,6 +181,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - A 96-file build-output-style modification burst produced 93 deduplicated watcher metadata paths. The backlog drained continuously in three batches over 993.6 ms with zero remaining paths, no new-event interruption, and a responsive main window.
 - Lower-priority storage, cloud, tag, and media-property enrichment now shares four work slots across tabs. Thumbnail loading remains ahead of this bounded section, and recycled or navigated-away items cancel while waiting for a slot.
 - The bounded metadata-enrichment change completed an isolated-output `Debug|x64` build with exit code 0. The resulting development DLL loaded the 4,911-item System32 folder with an initial batch in 69.9 ms, completed in 2,776.7 ms with zero Reset notifications, and remained responsive when navigating back to a 13-item snapshot.
+- Thumbnail-only retries no longer repeat icon-overlay Shell queries. A cloud retry also leaves an active generated-thumbnail request or existing timer retry in place instead of canceling and replacing it, and its delayed task observes navigation cancellation.
+- The deduplicated thumbnail-retry change completed an isolated-output `Debug|x64` build with exit code 0. An interactive 48-item test folder loaded its first batch in 80.1 ms and completed in 1,337.0 ms with zero Reset notifications. Twelve invalid PNG files each scheduled and ran exactly one timer retry; replacing them with valid PNG data triggered one watcher debounce per item without another failure or timer cycle, and the window remained responsive.
 
 ## Risks
 

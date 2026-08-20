@@ -1423,7 +1423,7 @@ namespace Files.App.ViewModels
 			return shieldIcon;
 		}
 
-		private async Task LoadThumbnailAsync(ListedItem item, CancellationToken cancellationToken, bool scheduleTimerRetry = true)
+		private async Task LoadThumbnailAsync(ListedItem item, CancellationToken cancellationToken, bool scheduleTimerRetry = true, bool loadIconOverlay = true)
 		{
 			var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
 			var thumbnailStartedTimestamp = Stopwatch.GetTimestamp();
@@ -1513,20 +1513,23 @@ namespace Files.App.ViewModels
 				cancellationToken.ThrowIfCancellationRequested();
 			}
 
-			// Get icon overlay
-			var iconOverlay = await GetInitialIconOverlayAsync(item.ItemPath, true, cancellationToken);
-
-			cancellationToken.ThrowIfCancellationRequested();
-
-			if (iconOverlay is not null)
+			if (loadIconOverlay)
 			{
-				await dispatcherQueue.EnqueueOrInvokeAsync(async () =>
-				{
-					item.IconOverlay = await iconOverlay.ToBitmapAsync();
-					item.ShieldIcon = await GetShieldIcon();
-				}, Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal);
+				// Get icon overlay
+				var iconOverlay = await GetInitialIconOverlayAsync(item.ItemPath, true, cancellationToken);
 
 				cancellationToken.ThrowIfCancellationRequested();
+
+				if (iconOverlay is not null)
+				{
+					await dispatcherQueue.EnqueueOrInvokeAsync(async () =>
+					{
+						item.IconOverlay = await iconOverlay.ToBitmapAsync();
+						item.ShieldIcon = await GetShieldIcon();
+					}, Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal);
+
+					cancellationToken.ThrowIfCancellationRequested();
+				}
 			}
 
 			loadMetrics?.RecordThumbnail(thumbnailStartedTimestamp, result is not null, generated: false, persistentCacheHit);
@@ -1585,7 +1588,7 @@ namespace Files.App.ViewModels
 											App.Logger.LogInformation("Timer-based thumbnail retry firing [{Id}] '{Extension}'.", item.ItemPath.GetHashCode(), Path.GetExtension(item.ItemPath));
 
 											item.NeedsDelayedThumbnailLoad = false;
-											return LoadThumbnailAsync(item, retryToken, scheduleTimerRetry: false);
+											return LoadThumbnailAsync(item, retryToken, scheduleTimerRetry: false, loadIconOverlay: false);
 										}, retryToken, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default)
 										.Unwrap();
 								}
@@ -1625,6 +1628,25 @@ namespace Files.App.ViewModels
 						generatedThumbnailCts.Dispose();
 					}
 				});
+			}
+		}
+
+		private async Task RetryCloudThumbnailAsync(ListedItem item, CancellationToken cancellationToken)
+		{
+			try
+			{
+				await Task.Delay(500, cancellationToken);
+				if (generatedThumbnailLoads.ContainsKey(item.ItemPath) || thumbnailRetryDebounce.ContainsKey(item.ItemPath))
+					return;
+
+				await LoadThumbnailAsync(item, cancellationToken, loadIconOverlay: false);
+			}
+			catch (OperationCanceledException)
+			{
+			}
+			catch (Exception ex)
+			{
+				App.Logger.LogWarning(ex, "Cloud thumbnail retry failed [{Id}] '{Extension}'.", item.ItemPath.GetHashCode(), Path.GetExtension(item.ItemPath));
 			}
 		}
 
@@ -1839,12 +1861,7 @@ namespace Files.App.ViewModels
 						// Try loading thumbnail for cloud files in case they weren't cached the first time
 						if (item.SyncStatusUI.SyncStatus != CloudDriveSyncStatus.NotSynced && item.SyncStatusUI.SyncStatus != CloudDriveSyncStatus.Unknown)
 						{
-							_ = Task.Run(async () =>
-							{
-								await Task.Delay(500);
-								token.ThrowIfCancellationRequested();
-								await LoadThumbnailAsync(item, token);
-							});
+							_ = RetryCloudThumbnailAsync(item, token);
 						}
 					}
 
@@ -3280,7 +3297,7 @@ namespace Files.App.ViewModels
 							cts.Dispose();
 
 						item.NeedsDelayedThumbnailLoad = false;
-						return LoadThumbnailAsync(item, debounceToken);
+						return LoadThumbnailAsync(item, debounceToken, loadIconOverlay: false);
 					}, debounceToken, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default)
 					.Unwrap();
 			}
