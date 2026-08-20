@@ -103,10 +103,11 @@ namespace Files.App.Data.Contracts
 		/// </summary>
 		/// <param name="repositoryPath">A path to the repository working directory.</param>
 		/// <param name="cancellationToken">A token used to cancel the operation.</param>
+		/// <param name="force">Whether to bypass the recent automatic-fetch cooldown.</param>
 		/// <remarks>
 		/// Implementations should raise <see cref="GitFetchCompleted"/> when the fetch completes successfully.
 		/// </remarks>
-		Task FetchOriginAsync(string? repositoryPath, CancellationToken cancellationToken = default);
+		Task FetchOriginAsync(string? repositoryPath, CancellationToken cancellationToken = default, bool force = false);
 
 		/// <summary>
 		/// Pulls from the default remote.

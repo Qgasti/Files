@@ -1,6 +1,7 @@
 using LibGit2Sharp;
 using Microsoft.Extensions.Logging;
 using Sentry;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -14,9 +15,12 @@ internal sealed partial class LibGit2Service // : IVersionControl
 
 	private const int END_OF_ORIGIN_PREFIX = 7;
 	private const int MAX_NUMBER_OF_BRANCHES = 30;
+	private const int MAX_RECENT_FETCH_REPOSITORIES = 64;
+	private const int AUTOMATIC_FETCH_COOLDOWN_SECONDS = 30;
 
 	private static readonly SemaphoreSlim GitOperationSemaphore = new(1, 1);
 	private static readonly SemaphoreSlim GitFetchSemaphore = new(1, 1);
+	private static readonly ConcurrentDictionary<string, long> _lastSuccessfulFetchTimestamps = new(StringComparer.OrdinalIgnoreCase);
 	private static readonly FetchOptions _fetchOptions = new() { Prune = true };
 	private static readonly PullOptions _pullOptions = new();
 	private static readonly string _clientId = AppLifecycleHelper.AppEnvironment is AppEnvironment.Dev
@@ -344,10 +348,15 @@ internal sealed partial class LibGit2Service // : IVersionControl
 			branch.FriendlyName.Equals(branchName, StringComparison.OrdinalIgnoreCase));
 	}
 
-	public async Task FetchOriginAsync(string? repositoryPath, CancellationToken cancellationToken = default)
+	public async Task FetchOriginAsync(string? repositoryPath, CancellationToken cancellationToken = default, bool force = false)
 	{
 		if (string.IsNullOrWhiteSpace(repositoryPath))
 			return;
+		if (!force && TryGetRecentFetchAge(repositoryPath, out var recentFetchAge))
+		{
+			LogSkippedAutomaticFetch(repositoryPath, recentFetchAge);
+			return;
+		}
 
 		var fetchStartedTimestamp = Stopwatch.GetTimestamp();
 		var activeFetchOperations = Interlocked.Increment(ref _activeFetchOperations);
@@ -365,10 +374,18 @@ internal sealed partial class LibGit2Service // : IVersionControl
 
 		var completedSuccessfully = false;
 		var fetchSemaphoreAcquired = false;
+		var skippedByCooldown = false;
 		try
 		{
 			await GitFetchSemaphore.WaitAsync(cancellationToken);
 			fetchSemaphoreAcquired = true;
+			if (!force && TryGetRecentFetchAge(repositoryPath, out recentFetchAge))
+			{
+				skippedByCooldown = true;
+				LogSkippedAutomaticFetch(repositoryPath, recentFetchAge);
+				return;
+			}
+
 			await Task.Run(() =>
 			{
 				using var repository = new Repository(repositoryPath);
@@ -428,16 +445,22 @@ internal sealed partial class LibGit2Service // : IVersionControl
 				GitFetchSemaphore.Release();
 
 			if (completedSuccessfully && !cancellationToken.IsCancellationRequested)
+			{
+				RecordSuccessfulFetch(repositoryPath);
 				Interlocked.Exchange(ref _pendingFetchCompletionNotification, 1);
+			}
 
 			activeFetchOperations = Interlocked.Decrement(ref _activeFetchOperations);
-			_logger.LogInformation(
-				"Git fetch finished for {RepositoryPath} in {ElapsedMs:F1} ms (successful: {Successful}, canceled: {Canceled}, active operations: {ActiveOperations}).",
-				LogPathHelper.GetPathIdentifier(repositoryPath),
-				Stopwatch.GetElapsedTime(fetchStartedTimestamp).TotalMilliseconds,
-				completedSuccessfully,
-				cancellationToken.IsCancellationRequested,
-				activeFetchOperations);
+			if (!skippedByCooldown)
+			{
+				_logger.LogInformation(
+					"Git fetch finished for {RepositoryPath} in {ElapsedMs:F1} ms (successful: {Successful}, canceled: {Canceled}, active operations: {ActiveOperations}).",
+					LogPathHelper.GetPathIdentifier(repositoryPath),
+					Stopwatch.GetElapsedTime(fetchStartedTimestamp).TotalMilliseconds,
+					completedSuccessfully,
+					cancellationToken.IsCancellationRequested,
+					activeFetchOperations);
+			}
 			if (activeFetchOperations == 0)
 			{
 				var raiseCompletion = Interlocked.Exchange(ref _pendingFetchCompletionNotification, 0) == 1;
@@ -449,6 +472,36 @@ internal sealed partial class LibGit2Service // : IVersionControl
 				});
 			}
 		}
+	}
+
+	private static bool TryGetRecentFetchAge(string repositoryPath, out TimeSpan age)
+	{
+		if (_lastSuccessfulFetchTimestamps.TryGetValue(repositoryPath, out var completedTimestamp))
+		{
+			age = Stopwatch.GetElapsedTime(completedTimestamp);
+			return age < TimeSpan.FromSeconds(AUTOMATIC_FETCH_COOLDOWN_SECONDS);
+		}
+
+		age = default;
+		return false;
+	}
+
+	private static void RecordSuccessfulFetch(string repositoryPath)
+	{
+		_lastSuccessfulFetchTimestamps[repositoryPath] = Stopwatch.GetTimestamp();
+		if (_lastSuccessfulFetchTimestamps.Count <= MAX_RECENT_FETCH_REPOSITORIES)
+			return;
+
+		var oldestEntry = _lastSuccessfulFetchTimestamps.MinBy(entry => entry.Value);
+		_lastSuccessfulFetchTimestamps.TryRemove(oldestEntry.Key, out _);
+	}
+
+	private static void LogSkippedAutomaticFetch(string repositoryPath, TimeSpan age)
+	{
+		_logger.LogInformation(
+			"Git automatic fetch skipped for {RepositoryPath}; last successful fetch was {AgeMs:F1} ms ago.",
+			LogPathHelper.GetPathIdentifier(repositoryPath),
+			age.TotalMilliseconds);
 	}
 
 	private static bool IsRepoValid(string path)

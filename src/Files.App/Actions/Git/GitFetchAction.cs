@@ -28,7 +28,7 @@ namespace Files.App.Actions
 		}
 
 		public Task ExecuteAsync(object? parameter = null)
-			=> GitHelpers.FetchOriginAsync(_context.ShellPage!.InstanceViewModel.GitRepositoryPath);
+			=> GitHelpers.FetchOriginAsync(_context.ShellPage!.InstanceViewModel.GitRepositoryPath, force: true);
 
 		private void Context_PropertyChanged(object? sender, PropertyChangedEventArgs e)
 		{
