@@ -86,6 +86,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Implement the existing persistent thumbnail-cache settings, size limit, least-recently-used eviction, size reporting, and clear operation.
 - [x] Validate persistent entries by normalized path, requested pixel size, modification timestamp, and file size.
 - [x] Cancel queued persistent-cache writes when their item leaves the realized range or its folder load is superseded, without faulting fire-and-forget tasks canceled before acquiring the cache I/O semaphore.
+- [x] Limit persistent-cache reads to eight concurrent operations across tabs and propagate cancellation instead of treating a canceled disk read as a cache miss followed by a Shell fallback.
 
 ### Phase 6: Watcher reconciliation
 
@@ -167,6 +168,8 @@ Every behavior-changing phase must satisfy all applicable gates:
 - The continuous watcher-drain and burst-instrumentation changes completed an isolated-output `Debug|x64` build with exit code 0.
 - Persistent thumbnail writes now inherit the item or generated-thumbnail cancellation token. Obsolete writes stop waiting on the serialized cache I/O queue and release their retained image buffers sooner.
 - The cancelable persistent-thumbnail-write changes completed an isolated-output `Debug|x64` build with exit code 0.
+- Persistent thumbnail reads now use an eight-operation service-level semaphore shared across tabs. Canceled reads propagate immediately instead of continuing into the Shell thumbnail fallback path.
+- The bounded persistent-thumbnail-read changes completed an isolated-output `Debug|x64` build with exit code 0.
 
 ## Risks
 

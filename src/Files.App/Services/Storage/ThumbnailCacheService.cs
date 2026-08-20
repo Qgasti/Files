@@ -11,10 +11,12 @@ namespace Files.App.Services
 {
 	internal sealed class ThumbnailCacheService : IThumbnailCacheService, IDisposable
 	{
+		private const int MaxConcurrentReads = 8;
 		private const int WritesBetweenTrims = 16;
 		private const string CacheFileExtension = ".thumb";
 
 		private readonly IUserSettingsService userSettingsService;
+		private readonly SemaphoreSlim cacheReadSemaphore = new(MaxConcurrentReads, MaxConcurrentReads);
 		private readonly SemaphoreSlim cacheIoSemaphore = new(1, 1);
 		private readonly string cacheDirectory = Path.Combine(ApplicationData.Current.LocalCacheFolder.Path, "Thumbnails");
 		private int writesSinceTrim;
@@ -35,8 +37,11 @@ namespace Files.App.Services
 				return null;
 
 			var cachePath = GetCachePath(path, pixelSize, modified, fileSize);
+			var lockTaken = false;
 			try
 			{
+				await cacheReadSemaphore.WaitAsync(cancellationToken);
+				lockTaken = true;
 				var data = await File.ReadAllBytesAsync(cachePath, cancellationToken);
 				if (data.Length == 0)
 					return null;
@@ -60,10 +65,19 @@ namespace Files.App.Services
 			{
 				return null;
 			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
 			catch (Exception ex)
 			{
 				App.Logger.LogDebug(ex, "Failed to read a persistent thumbnail cache entry.");
 				return null;
+			}
+			finally
+			{
+				if (lockTaken)
+					cacheReadSemaphore.Release();
 			}
 		}
 
@@ -215,6 +229,7 @@ namespace Files.App.Services
 
 		public void Dispose()
 		{
+			cacheReadSemaphore.Dispose();
 			cacheIoSemaphore.Dispose();
 		}
 	}
