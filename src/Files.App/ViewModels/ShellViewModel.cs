@@ -2971,6 +2971,7 @@ namespace Files.App.ViewModels
 			const int UPDATE_BATCH_SIZE = 32;
 			var sampler = new IntervalSampler(200);
 			var updateQueue = new Queue<string>();
+			var queuedUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
 			var anyEdits = false;
 			ListedItem? lastItemAdded = null;
@@ -3018,7 +3019,7 @@ namespace Files.App.ViewModels
 										break;
 
 									case FILE_ACTION_MODIFIED:
-										if (!updateQueue.Contains(operation.FileName))
+										if (queuedUpdatePaths.Add(operation.FileName))
 											updateQueue.Enqueue(operation.FileName);
 										break;
 
@@ -3066,7 +3067,11 @@ namespace Files.App.ViewModels
 
 						var itemsToUpdate = new List<string>();
 						for (var i = 0; i < UPDATE_BATCH_SIZE && updateQueue.Count > 0; i++)
-							itemsToUpdate.Add(updateQueue.Dequeue());
+						{
+							var itemPath = updateQueue.Dequeue();
+							queuedUpdatePaths.Remove(itemPath);
+							itemsToUpdate.Add(itemPath);
+						}
 
 						await UpdateFilesOrFoldersAsync(itemsToUpdate, hasSyncStatus);
 					}
@@ -3075,7 +3080,11 @@ namespace Files.App.ViewModels
 					{
 						var itemsToUpdate = new List<string>();
 						for (var i = 0; i < UPDATE_BATCH_SIZE && updateQueue.Count > 0; i++)
-							itemsToUpdate.Add(updateQueue.Dequeue());
+						{
+							var itemPath = updateQueue.Dequeue();
+							queuedUpdatePaths.Remove(itemPath);
+							itemsToUpdate.Add(itemPath);
+						}
 
 						await UpdateFilesOrFoldersAsync(itemsToUpdate, hasSyncStatus);
 					}
@@ -3209,34 +3218,38 @@ namespace Files.App.ViewModels
 
 		private async Task UpdateFilesOrFoldersAsync(IEnumerable<string> paths, bool hasSyncStatus)
 		{
-			foreach (var path in paths)
+			const int MAX_CONCURRENT_ITEM_UPDATES = 8;
+			var requestedPaths = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+			if (requestedPaths.Count == 0)
+				return;
+
+			var itemsNeedingThumbnailRetry = filesAndFolders.ToList()
+				.Where(item => requestedPaths.Contains(item.ItemPath) && item.NeedsDelayedThumbnailLoad);
+			foreach (var item in itemsNeedingThumbnailRetry)
 			{
-				var item = filesAndFolders.ToList().FirstOrDefault(x => x.ItemPath.Equals(path, StringComparison.OrdinalIgnoreCase));
-				if (item is not null && item.NeedsDelayedThumbnailLoad)
+				var itemPath = item.ItemPath;
+				App.Logger.LogInformation("FILE_ACTION_MODIFIED thumbnail retry triggered [{Id}] '{Extension}'.", itemPath.GetHashCode(), Path.GetExtension(itemPath));
+
+				if (thumbnailRetryDebounce.TryGetValue(itemPath, out var existingCts))
 				{
-					App.Logger.LogInformation("FILE_ACTION_MODIFIED thumbnail retry triggered [{Id}] '{Extension}'.", path.GetHashCode(), Path.GetExtension(path));
-
-					if (thumbnailRetryDebounce.TryGetValue(path, out var existingCts))
-					{
-						existingCts.Cancel();
-						existingCts.Dispose();
-					}
-
-					var debounceCts = new CancellationTokenSource();
-					thumbnailRetryDebounce[path] = debounceCts;
-					var debounceToken = debounceCts.Token;
-
-					_ = Task.Delay(500, debounceToken)
-						.ContinueWith(_ =>
-						{
-							if (thumbnailRetryDebounce.TryRemove(path, out var cts))
-								cts.Dispose();
-
-							item.NeedsDelayedThumbnailLoad = false;
-							return LoadThumbnailAsync(item, debounceToken);
-						}, debounceToken, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default)
-						.Unwrap();
+					existingCts.Cancel();
+					existingCts.Dispose();
 				}
+
+				var debounceCts = new CancellationTokenSource();
+				thumbnailRetryDebounce[itemPath] = debounceCts;
+				var debounceToken = debounceCts.Token;
+
+				_ = Task.Delay(500, debounceToken)
+					.ContinueWith(_ =>
+					{
+						if (thumbnailRetryDebounce.TryRemove(itemPath, out var cts))
+							cts.Dispose();
+
+						item.NeedsDelayedThumbnailLoad = false;
+						return LoadThumbnailAsync(item, debounceToken);
+					}, debounceToken, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default)
+					.Unwrap();
 			}
 
 			try
@@ -3250,8 +3263,12 @@ namespace Files.App.ViewModels
 
 			try
 			{
-				var matchingItems = filesAndFolders.ToList().Where(x => paths.Any(p => p.Equals(x.ItemPath, StringComparison.OrdinalIgnoreCase)));
-				var results = await Task.WhenAll(matchingItems.Select(x => GetFileOrFolderUpdateInfoAsync(x, hasSyncStatus)));
+				var matchingItems = filesAndFolders.ToList()
+					.Where(item => requestedPaths.Contains(item.ItemPath))
+					.ToList();
+				var results = new List<(ListedItem Item, CloudDriveSyncStatus? SyncStatus, long? Size, DateTimeOffset Created, DateTimeOffset Modified)?>(matchingItems.Count);
+				foreach (var batch in matchingItems.Chunk(MAX_CONCURRENT_ITEM_UPDATES))
+					results.AddRange(await Task.WhenAll(batch.Select(item => GetFileOrFolderUpdateInfoAsync(item, hasSyncStatus))));
 
 				await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 				{
@@ -3283,7 +3300,7 @@ namespace Files.App.ViewModels
 
 					// Sort the changed groups and their position among the other groups
 					if (itemsRegrouped)
-						OrderGroups();
+						OrderGroupsWithMoves();
 				},
 				Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
 			}

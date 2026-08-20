@@ -26,6 +26,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 | High | UI collection updates | Flat, filtered, and grouped batches use sorted single-item notifications. Final projections use at most 64 Add/Remove/Move operations and fall back to one Reset only for larger or wholly replaced projections. | Extend differential updates while preserving selection, grouping, and layout behavior. | Implemented; grouped refresh verified |
 | High | Extended properties and thumbnails | Realized containers drive enrichment, recycled containers now cancel per-item metadata, retry, and generated-thumbnail work, and thumbnail work runs before lower-priority metadata. Initial Shell calls are bounded and validated thumbnails are persisted. | Split enrichment by priority, cancel work outside the visible range, use bounded concurrency, and persist validated thumbnail results. | Implemented and locally verified |
 | Medium | Sorting and grouping | Progressive batches are inserted in final sort order. Group members and group headers are reordered with Move notifications, avoiding a complete Reset for bounded diffs. | Keep the single final sort unless profiling proves incremental ordering is cheaper; avoid an additional full collection reset where possible. | Implemented; grouped refresh verified |
+| High | Watcher modification bursts | Modified paths are deduplicated with a case-insensitive index, matched against one collection snapshot, and refreshed in batches of at most eight concurrent storage-property requests. | Keep watcher queueing and item matching linear while bounding storage and cloud work triggered by large sync, extraction, or build bursts. | Implemented; profiling pending |
 
 ## Existing partial improvements
 
@@ -63,6 +64,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Insert filtered intermediate and final-tail items using the active sort order without rebuilding already displayed items.
 - [x] Apply flat final projections with at most 64 single-item Add, Remove, or Move notifications; use one Reset for larger or wholly replaced projections.
 - [x] Add safe single-item updates for grouped intermediate and final projections, including Move-based member and group-header ordering.
+- [x] Plan grouped reordering before applying it, cap differential updates at 64 Move notifications, and use one Reset for larger reorders without first applying a partial Move sequence.
 - [x] Verify selection and scroll preservation during a grouped refresh; an 85-item folder retained its selection and exact 19.0439% scroll position with no Reset notification.
 - [ ] Verify keyboard focus plus selection and scroll preservation across every filter, sort, layout, and snapshot-reconciliation combination.
 - [x] Avoid the final flat-view Reset when progressively inserted items already match the final sorted projection.
@@ -82,6 +84,14 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Limit initial cached-thumbnail, icon, and overlay Shell calls to six concurrent operations while keeping non-cached thumbnail generation serialized.
 - [x] Implement the existing persistent thumbnail-cache settings, size limit, least-recently-used eviction, size reporting, and clear operation.
 - [x] Validate persistent entries by normalized path, requested pixel size, modification timestamp, and file size.
+
+### Phase 6: Watcher reconciliation
+
+- [x] Replace the modified-path queue's linear duplicate checks with a case-insensitive path index that is updated as entries are dequeued.
+- [x] Materialize each watcher update's requested paths once and match them against one collection snapshot instead of repeatedly copying and cross-scanning the folder collection.
+- [x] Limit watcher-triggered storage, cloud, and basic-property refreshes to batches of eight concurrent items.
+- [x] Reorder watcher-affected group members and headers with Move notifications, processing only groups marked unsorted instead of issuing a full group order Reset.
+- [ ] Profile a large OneDrive, extraction, or build-output modification burst in an interactive development package.
 
 ## Verification gates
 
@@ -144,6 +154,11 @@ Every behavior-changing phase must satisfy all applicable gates:
 - Fixed a selection-snapshot race where navigation captured the outgoing folder's selected items, then the incoming page overwrote that snapshot with its initially empty selection. Selection is now captured only before navigation changes the active content page.
 - The focused isolated-output `Debug|x64` build completed with exit code 0 after the selection-snapshot correction.
 - Interactive verification remains pending because this Windows user does not currently have the required Windows App Runtime 2 framework registered. A separate `FilesCodexSelectionTest` identity avoided the existing `FilesDev` conflict, but registration correctly stopped at the missing per-user framework dependency; no system runtime was installed or changed.
+- Watcher modification bursts now use a case-insensitive path index instead of repeated queue scans, perform two linear collection passes instead of per-path full scans, and limit storage-property refreshes to eight concurrent items. Interactive burst profiling remains pending.
+- Watcher-driven date or size changes that move an item between groups now reuse differential Move ordering; already sorted groups and group headers are skipped.
+- The combined watcher queue, bounded property refresh, and differential group-ordering changes completed an isolated-output `Debug|x64` build with exit code 0.
+- Group member and header ordering now plans moves from one collection snapshot. Reorders requiring more than 64 moves use one bulk Reset, avoiding both repeated collection copies and an unbounded stream of UI notifications.
+- The bounded grouped-reorder implementation completed an isolated-output `Debug|x64` build with exit code 0 together with the watcher burst changes.
 
 ## Risks
 

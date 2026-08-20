@@ -46,7 +46,7 @@ namespace Files.App.ViewModels
 			if (groups is null)
 				return;
 
-			foreach (var group in groups.ToList())
+			foreach (var group in groups.Where(group => !group.IsSorted).ToList())
 			{
 				var orderedItems = SortingHelper.OrderFileList(
 					group.ToList(),
@@ -54,9 +54,12 @@ namespace Files.App.ViewModels
 					folderSettings.DirectorySortDirection,
 					folderSettings.SortDirectoriesAlongsideFiles,
 					folderSettings.SortFilesFirst).ToList();
-				MoveItemsToOrder(group, orderedItems);
+				ApplyOrderWithBoundedMoves(group, orderedItems);
 				group.IsSorted = true;
 			}
+
+			if (groups.IsSorted)
+				return;
 
 			IEnumerable<GroupedCollection<ListedItem>> orderedGroups;
 			if (folderSettings.DirectoryGroupDirection == SortDirection.Ascending)
@@ -76,22 +79,59 @@ namespace Files.App.ViewModels
 					: groups.OrderByDescending(group => group.Model.SortIndexOverride).ThenByDescending(group => group.Model.Text);
 			}
 
-			MoveItemsToOrder(groups, orderedGroups.ToList());
+			ApplyOrderWithBoundedMoves(groups, orderedGroups.ToList());
 			groups.IsSorted = true;
 		}
 
-		private static void MoveItemsToOrder<T>(BulkConcurrentObservableCollection<T> collection, IReadOnlyList<T> orderedItems)
+		private static void ApplyOrderWithBoundedMoves<T>(BulkConcurrentObservableCollection<T> collection, IReadOnlyList<T> orderedItems)
+			where T : class
 		{
+			if (TryCreateCollectionMoves(collection.ToList(), orderedItems, out var moves))
+			{
+				foreach (var move in moves)
+					collection.Move(move.OldIndex, move.NewIndex);
+				return;
+			}
+
+			collection.BeginBulkOperation();
+			try
+			{
+				collection.Clear();
+				collection.AddRange(orderedItems);
+			}
+			finally
+			{
+				collection.EndBulkOperation();
+			}
+		}
+
+		private static bool TryCreateCollectionMoves<T>(IReadOnlyList<T> currentItems, IReadOnlyList<T> orderedItems, out List<(int OldIndex, int NewIndex)> moves)
+			where T : class
+		{
+			moves = [];
+			if (currentItems.Count != orderedItems.Count)
+				return false;
+
+			var workingItems = currentItems.ToList();
 			for (var targetIndex = 0; targetIndex < orderedItems.Count; targetIndex++)
 			{
-				if (ReferenceEquals(collection[targetIndex], orderedItems[targetIndex]))
+				if (ReferenceEquals(workingItems[targetIndex], orderedItems[targetIndex]))
 					continue;
 
-				var currentItems = collection.ToList();
-				var currentIndex = currentItems.FindIndex(targetIndex, item => ReferenceEquals(item, orderedItems[targetIndex]));
-				if (currentIndex >= 0)
-					collection.Move(currentIndex, targetIndex);
+				var currentIndex = workingItems.FindIndex(targetIndex, item => ReferenceEquals(item, orderedItems[targetIndex]));
+				if (currentIndex < 0)
+					return false;
+
+				moves.Add((currentIndex, targetIndex));
+				if (moves.Count > MaxDifferentialCollectionOperations)
+					return false;
+
+				var item = workingItems[currentIndex];
+				workingItems.RemoveAt(currentIndex);
+				workingItems.Insert(targetIndex, item);
 			}
+
+			return true;
 		}
 
 		private static bool TryCreateFlatCollectionDiff(
