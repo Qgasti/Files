@@ -19,6 +19,9 @@ namespace Files.App.ViewModels
 			private int thumbnailCount;
 			private int thumbnailSuccessCount;
 			private int persistentThumbnailHitCount;
+			private int thumbnailReuseCount;
+			private int thumbnailPrefetchCompletedCount;
+			private int thumbnailPrefetchCanceledCount;
 			private long generatedThumbnailElapsedTicks;
 			private long generatedThumbnailMaxElapsedTicks;
 			private int generatedThumbnailCount;
@@ -134,6 +137,36 @@ namespace Files.App.ViewModels
 						generated ? "generated" : "cached/icon",
 						TicksToMilliseconds(elapsedTicks),
 						succeeded);
+				}
+			}
+
+			public void RecordThumbnailReuse()
+			{
+				if (Interlocked.Increment(ref thumbnailReuseCount) == 1)
+				{
+					App.Logger.LogInformation(
+						"Folder load {CorrelationId} reused its first initialized thumbnail without another cache or Shell request.",
+						CorrelationId);
+				}
+			}
+
+			public void RecordThumbnailPrefetchCompleted()
+			{
+				if (Interlocked.Increment(ref thumbnailPrefetchCompletedCount) == 1)
+				{
+					App.Logger.LogInformation(
+						"Folder load {CorrelationId} completed its first near-visible thumbnail prefetch.",
+						CorrelationId);
+				}
+			}
+
+			public void RecordThumbnailPrefetchCanceled()
+			{
+				if (Interlocked.Increment(ref thumbnailPrefetchCanceledCount) == 1)
+				{
+					App.Logger.LogInformation(
+						"Folder load {CorrelationId} canceled its first obsolete near-visible thumbnail prefetch.",
+						CorrelationId);
 				}
 			}
 

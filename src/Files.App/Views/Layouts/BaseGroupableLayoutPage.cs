@@ -134,6 +134,7 @@ namespace Files.App.Views.Layouts
 
 			ParentShellPageInstance.ShellViewModel.CancelExtendedPropertiesLoading();
 			ParentShellPageInstance.SlimContentPage.SelectedItem.ItemPropertiesInitialized = false;
+			ParentShellPageInstance.SlimContentPage.SelectedItem.ThumbnailPropertiesInitialized = false;
 
 			await ParentShellPageInstance.ShellViewModel.LoadExtendedItemPropertiesAsync(ParentShellPageInstance.SlimContentPage.SelectedItem);
 
@@ -154,6 +155,7 @@ namespace Files.App.Views.Layouts
 			foreach (var selectedItem in ParentShellPageInstance.SlimContentPage.SelectedItems)
 			{
 				selectedItem.ItemPropertiesInitialized = false;
+				selectedItem.ThumbnailPropertiesInitialized = false;
 				await ParentShellPageInstance.ShellViewModel.LoadExtendedItemPropertiesAsync(selectedItem);
 			}
 

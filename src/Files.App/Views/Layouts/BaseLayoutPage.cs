@@ -35,6 +35,9 @@ namespace Files.App.Views.Layouts
 	/// </summary>
 	public abstract class BaseLayoutPage : Page, IBaseLayoutPage, INotifyPropertyChanged
 	{
+		private const int MaxThumbnailPrefetchItems = 8;
+		private const int ThumbnailPrefetchItemsPerSide = MaxThumbnailPrefetchItems / 2;
+
 		// Dependency injections
 
 		protected IFileTagsSettingsService FileTagsSettingsService { get; } = Ioc.Default.GetService<IFileTagsSettingsService>()!;
@@ -58,6 +61,8 @@ namespace Files.App.Views.Layouts
 		private DispatcherQueueTimer? dragOverTimer;
 		private DispatcherQueueTimer? tapDebounceTimer;
 		private DispatcherQueueTimer? hoverTimer;
+		private DispatcherQueueTimer? thumbnailPrefetchTimer;
+		private ListViewBase? thumbnailPrefetchList;
 
 		private readonly DragEventHandler Item_DragOverEventHandler;
 		public event PropertyChangedEventHandler? PropertyChanged;
@@ -392,6 +397,85 @@ namespace Files.App.Views.Layouts
 		private DispatcherQueueTimer TapDebounceTimer => tapDebounceTimer ??= DispatcherQueue.CreateTimer();
 		private DispatcherQueueTimer HoverTimer => hoverTimer ??= DispatcherQueue.CreateTimer();
 
+		private void ScheduleThumbnailPrefetch(ListViewBase fileList)
+		{
+			thumbnailPrefetchList = fileList;
+			if (thumbnailPrefetchTimer is null)
+			{
+				thumbnailPrefetchTimer = DispatcherQueue.CreateTimer();
+				thumbnailPrefetchTimer.Interval = TimeSpan.FromMilliseconds(150);
+				thumbnailPrefetchTimer.Tick += ThumbnailPrefetchTimer_Tick;
+			}
+
+			thumbnailPrefetchTimer.Stop();
+			thumbnailPrefetchTimer.Start();
+		}
+
+		private void ThumbnailPrefetchTimer_Tick(DispatcherQueueTimer sender, object args)
+		{
+			sender.Stop();
+			UpdateThumbnailPrefetchRange();
+		}
+
+		private void UpdateThumbnailPrefetchRange()
+		{
+			if (ParentShellPageInstance is null || thumbnailPrefetchList is null ||
+				ParentShellPageInstance.ShellViewModel.IsLoadingItems)
+			{
+				ParentShellPageInstance?.ShellViewModel.CancelThumbnailPrefetches();
+				return;
+			}
+
+			var (firstVisibleIndex, lastVisibleIndex) = thumbnailPrefetchList.ItemsPanelRoot switch
+			{
+				ItemsStackPanel panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+				ItemsWrapGrid panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+				_ => (-1, -1),
+			};
+
+			var itemCount = thumbnailPrefetchList.Items.Count;
+			if (firstVisibleIndex < 0 || lastVisibleIndex < firstVisibleIndex || lastVisibleIndex >= itemCount)
+			{
+				ParentShellPageInstance.ShellViewModel.CancelThumbnailPrefetches();
+				return;
+			}
+
+			var beforeCount = Math.Min(ThumbnailPrefetchItemsPerSide, firstVisibleIndex);
+			var afterCount = Math.Min(ThumbnailPrefetchItemsPerSide, itemCount - lastVisibleIndex - 1);
+			var remainingCount = MaxThumbnailPrefetchItems - beforeCount - afterCount;
+			var extraAfterCount = Math.Min(remainingCount, itemCount - lastVisibleIndex - 1 - afterCount);
+			afterCount += extraAfterCount;
+			remainingCount -= extraAfterCount;
+			beforeCount += Math.Min(remainingCount, firstVisibleIndex - beforeCount);
+
+			var prefetchItems = new List<ListedItem>(beforeCount + afterCount);
+			for (var index = firstVisibleIndex - beforeCount; index < firstVisibleIndex; index++)
+			{
+				if (thumbnailPrefetchList.Items[index] is ListedItem item)
+					prefetchItems.Add(item);
+			}
+			for (var index = lastVisibleIndex + 1; index <= lastVisibleIndex + afterCount; index++)
+			{
+				if (thumbnailPrefetchList.Items[index] is ListedItem item)
+					prefetchItems.Add(item);
+			}
+
+			ParentShellPageInstance.ShellViewModel.SetThumbnailPrefetchItems(prefetchItems);
+		}
+
+		private void ShellViewModel_ThumbnailPrefetchItemLoadStatusChanged(object sender, ItemLoadStatusChangedEventArgs e)
+		{
+			if (e.Status is ItemLoadStatusChangedEventArgs.ItemLoadStatus.Complete && ItemsControl is ListViewBase fileList)
+				ScheduleThumbnailPrefetch(fileList);
+		}
+
+		private void StopThumbnailPrefetch()
+		{
+			thumbnailPrefetchTimer?.Stop();
+			thumbnailPrefetchList = null;
+			ParentShellPageInstance?.ShellViewModel.CancelThumbnailPrefetches();
+		}
+
 		protected IEnumerable<ListedItem>? GetAllItems()
 		{
 			var items = CollectionViewSource.IsSourceGrouped
@@ -475,6 +559,8 @@ namespace Files.App.Views.Layouts
 
 			navigationArguments = (NavigationArguments)e.Parameter;
 			ParentShellPageInstance = navigationArguments.AssociatedTabInstance;
+			ParentShellPageInstance.ShellViewModel.ItemLoadStatusChanged -= ShellViewModel_ThumbnailPrefetchItemLoadStatusChanged;
+			ParentShellPageInstance.ShellViewModel.ItemLoadStatusChanged += ShellViewModel_ThumbnailPrefetchItemLoadStatusChanged;
 
 			// Git properties are not loaded by default
 			ParentShellPageInstance.ShellViewModel.EnabledGitProperties = GitProperties.None;
@@ -831,6 +917,8 @@ namespace Files.App.Views.Layouts
 		protected override void OnNavigatingFrom(NavigatingCancelEventArgs e)
 		{
 			base.OnNavigatingFrom(e);
+			ParentShellPageInstance?.ShellViewModel.ItemLoadStatusChanged -= ShellViewModel_ThumbnailPrefetchItemLoadStatusChanged;
+			StopThumbnailPrefetch();
 
 			// Remove item jumping handler
 			CharacterReceived -= Page_CharacterReceived;
@@ -1113,6 +1201,7 @@ namespace Files.App.Views.Layouts
 		{
 			RefreshContainer(args.ItemContainer, args.InRecycleQueue);
 			RefreshItem(args.ItemContainer, args.Item, args.InRecycleQueue, args);
+			ScheduleThumbnailPrefetch(sender);
 
 			// Set can window to front (#13255)
 			itemDragging = false;
@@ -1157,6 +1246,7 @@ namespace Files.App.Views.Layouts
 
 			if (item is ListedItem listedItem)
 			{
+				ParentShellPageInstance!.ShellViewModel.CancelThumbnailPrefetchForItem(listedItem);
 				UpdateItemToolTip(container, listedItem.ItemTooltipText);
 				InitializeDrag(container, listedItem);
 
@@ -1359,6 +1449,8 @@ namespace Files.App.Views.Layouts
 				return;
 
 			isDisposed = true;
+			ParentShellPageInstance?.ShellViewModel.ItemLoadStatusChanged -= ShellViewModel_ThumbnailPrefetchItemLoadStatusChanged;
+			StopThumbnailPrefetch();
 			UnhookBaseEvents();
 			StatusBarViewModel.Dispose();
 			dragOverItem = null;

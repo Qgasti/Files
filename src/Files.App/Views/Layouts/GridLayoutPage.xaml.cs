@@ -599,6 +599,7 @@ namespace Files.App.Views.Layouts
 			foreach (ListedItem listedItem in filesAndFolders)
 			{
 				listedItem.ItemPropertiesInitialized = false;
+				listedItem.ThumbnailPropertiesInitialized = false;
 				if (FileList.ContainerFromItem(listedItem) is not null)
 					await ParentShellPageInstance.ShellViewModel.LoadExtendedItemPropertiesAsync(listedItem);
 			}

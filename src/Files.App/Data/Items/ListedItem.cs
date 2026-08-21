@@ -41,6 +41,13 @@ namespace Files.App.Utils
 			set => Interlocked.Exchange(ref itemPropertiesInitialized, value ? 1 : 0);
 		}
 
+		private volatile int thumbnailPropertiesInitialized = 0;
+		public bool ThumbnailPropertiesInitialized
+		{
+			get => thumbnailPropertiesInitialized == 1;
+			set => Interlocked.Exchange(ref thumbnailPropertiesInitialized, value ? 1 : 0);
+		}
+
 		public string ItemTooltipText
 		{
 			get

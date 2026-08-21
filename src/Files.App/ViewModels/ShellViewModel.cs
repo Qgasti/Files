@@ -33,8 +33,10 @@ namespace Files.App.ViewModels
 	public sealed partial class ShellViewModel : ObservableObject, IDisposable
 	{
 		private const int MaxConcurrentExtendedPropertyLoads = 4;
+		private const int MaxConcurrentThumbnailPrefetchLoads = 1;
 
 		private static readonly SemaphoreSlim extendedPropertiesSemaphore = new(MaxConcurrentExtendedPropertyLoads, MaxConcurrentExtendedPropertyLoads);
+		private static readonly SemaphoreSlim thumbnailPrefetchSemaphore = new(MaxConcurrentThumbnailPrefetchLoads, MaxConcurrentThumbnailPrefetchLoads);
 
 		private readonly SemaphoreSlim enumFolderSemaphore;
 		private readonly SemaphoreSlim getFileOrFolderSemaphore;
@@ -44,6 +46,8 @@ namespace Files.App.ViewModels
 		private readonly ConcurrentQueue<(uint Action, string FileName)> operationQueue;
 		private readonly ConcurrentQueue<uint> gitChangesQueue;
 		private readonly ConcurrentDictionary<string, CancellationTokenSource> itemLoadQueue;
+		private readonly ConcurrentDictionary<string, ListedItem> thumbnailPrefetchItems;
+		private readonly ConcurrentDictionary<string, CancellationTokenSource> thumbnailPrefetchLoads;
 		private readonly Dictionary<string, ListedItem> deferredVisiblePropertyLoads;
 		private readonly object deferredVisiblePropertyLoadsSyncRoot = new();
 		private readonly ConcurrentDictionary<string, CancellationTokenSource> generatedThumbnailLoads;
@@ -744,6 +748,8 @@ namespace Files.App.ViewModels
 			operationQueue = new ConcurrentQueue<(uint Action, string FileName)>();
 			gitChangesQueue = new ConcurrentQueue<uint>();
 			itemLoadQueue = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
+			thumbnailPrefetchItems = new ConcurrentDictionary<string, ListedItem>(StringComparer.OrdinalIgnoreCase);
+			thumbnailPrefetchLoads = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
 			deferredVisiblePropertyLoads = new Dictionary<string, ListedItem>(StringComparer.OrdinalIgnoreCase);
 			generatedThumbnailLoads = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
 			thumbnailRetryDebounce = new ConcurrentDictionary<string, CancellationTokenSource>();
@@ -939,6 +945,7 @@ namespace Files.App.ViewModels
 		public void CancelExtendedPropertiesLoading()
 		{
 			CancelDeferredItemCollectionRefresh();
+			CancelThumbnailPrefetches();
 			lock (deferredVisiblePropertyLoadsSyncRoot)
 				deferredVisiblePropertyLoads.Clear();
 			loadPropsCTS.Cancel();
@@ -954,12 +961,129 @@ namespace Files.App.ViewModels
 				deferredVisiblePropertyLoads.Remove(item.ItemPath);
 			if (itemLoadQueue.TryGetValue(item.ItemPath, out var itemCts))
 				itemCts.Cancel();
+			var shouldRetryThumbnail = false;
 			if (generatedThumbnailLoads.TryGetValue(item.ItemPath, out var thumbnailCts))
+			{
 				thumbnailCts.Cancel();
+				shouldRetryThumbnail = true;
+			}
 			if (thumbnailRetryDebounce.TryRemove(item.ItemPath, out var retryCts))
 			{
 				retryCts.Cancel();
 				retryCts.Dispose();
+				shouldRetryThumbnail = true;
+			}
+			if (shouldRetryThumbnail)
+				item.ThumbnailPropertiesInitialized = false;
+		}
+
+		public void SetThumbnailPrefetchItems(IEnumerable<ListedItem> items)
+		{
+			var requestedItems = items
+				.Where(item => item is not null)
+				.DistinctBy(item => item.ItemPath, StringComparer.OrdinalIgnoreCase)
+				.ToDictionary(item => item.ItemPath, StringComparer.OrdinalIgnoreCase);
+
+			foreach (var itemPath in thumbnailPrefetchItems.Keys)
+			{
+				if (!requestedItems.ContainsKey(itemPath) && thumbnailPrefetchItems.TryGetValue(itemPath, out var item))
+					CancelThumbnailPrefetchForItem(item);
+			}
+
+			if (IsLoadingItems)
+				return;
+
+			foreach (var item in requestedItems.Values)
+			{
+				if (item.ItemPropertiesInitialized || item.ThumbnailPropertiesInitialized ||
+					!thumbnailPrefetchItems.TryAdd(item.ItemPath, item))
+				{
+					continue;
+				}
+
+				var prefetchCts = CancellationTokenSource.CreateLinkedTokenSource(loadPropsCTS.Token);
+				if (!thumbnailPrefetchLoads.TryAdd(item.ItemPath, prefetchCts))
+				{
+					thumbnailPrefetchItems.TryRemove(item.ItemPath, out _);
+					prefetchCts.Dispose();
+					continue;
+				}
+
+				_ = PrefetchThumbnailAsync(item, prefetchCts);
+			}
+		}
+
+		public void CancelThumbnailPrefetchForItem(ListedItem item)
+		{
+			if (!thumbnailPrefetchItems.TryRemove(item.ItemPath, out _))
+				return;
+
+			if (thumbnailPrefetchLoads.TryGetValue(item.ItemPath, out var prefetchCts))
+				prefetchCts.Cancel();
+
+			var shouldRetryThumbnail = false;
+			if (generatedThumbnailLoads.TryGetValue(item.ItemPath, out var thumbnailCts))
+			{
+				thumbnailCts.Cancel();
+				shouldRetryThumbnail = true;
+			}
+			if (thumbnailRetryDebounce.TryRemove(item.ItemPath, out var retryCts))
+			{
+				retryCts.Cancel();
+				retryCts.Dispose();
+				shouldRetryThumbnail = true;
+			}
+			if (shouldRetryThumbnail)
+				item.ThumbnailPropertiesInitialized = false;
+		}
+
+		public void CancelThumbnailPrefetches()
+		{
+			foreach (var item in thumbnailPrefetchItems.Values)
+				CancelThumbnailPrefetchForItem(item);
+		}
+
+		private async Task PrefetchThumbnailAsync(ListedItem item, CancellationTokenSource prefetchCts)
+		{
+			var token = prefetchCts.Token;
+			var semaphoreAcquired = false;
+			var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
+
+			try
+			{
+				await thumbnailPrefetchSemaphore.WaitAsync(token);
+				semaphoreAcquired = true;
+				token.ThrowIfCancellationRequested();
+				while (!itemLoadQueue.IsEmpty)
+					await Task.Delay(50, token);
+
+				if (!thumbnailPrefetchItems.TryGetValue(item.ItemPath, out var currentItem) ||
+					!ReferenceEquals(currentItem, item) || item.ItemPropertiesInitialized || item.ThumbnailPropertiesInitialized)
+				{
+					return;
+				}
+
+				await LoadThumbnailAsync(item, token);
+				item.ThumbnailPropertiesInitialized = true;
+				loadMetrics?.RecordThumbnailPrefetchCompleted();
+			}
+			catch (OperationCanceledException)
+			{
+				loadMetrics?.RecordThumbnailPrefetchCanceled();
+			}
+			catch (Exception ex)
+			{
+				thumbnailPrefetchItems.TryRemove(item.ItemPath, out _);
+				App.Logger.LogDebug(ex, "Near-visible thumbnail prefetch failed [{Id}] '{Extension}'.", item.ItemPath.GetHashCode(), Path.GetExtension(item.ItemPath));
+			}
+			finally
+			{
+				if (semaphoreAcquired)
+					thumbnailPrefetchSemaphore.Release();
+
+				if (thumbnailPrefetchLoads.TryGetValue(item.ItemPath, out var currentCts) && ReferenceEquals(currentCts, prefetchCts))
+					thumbnailPrefetchLoads.TryRemove(item.ItemPath, out _);
+				prefetchCts.Dispose();
 			}
 		}
 
@@ -1746,7 +1870,15 @@ namespace Files.App.ViewModels
 				token.ThrowIfCancellationRequested();
 
 				item.ItemPropertiesInitialized = true;
-				await LoadThumbnailAsync(item, token);
+				if (!item.ThumbnailPropertiesInitialized)
+				{
+					await LoadThumbnailAsync(item, token);
+					item.ThumbnailPropertiesInitialized = true;
+				}
+				else
+				{
+					Volatile.Read(ref activeFolderLoadMetrics)?.RecordThumbnailReuse();
+				}
 				token.ThrowIfCancellationRequested();
 
 				var requiresCollectionRefresh = await EnrichShortcutAsync(item, token);
@@ -3438,6 +3570,11 @@ namespace Files.App.ViewModels
 						if (result is not null && currentItems.Contains(result.Value.Item))
 						{
 							var item = result.Value.Item;
+							if (item.ItemDateModifiedReal != result.Value.Modified ||
+								(result.Value.Size is not null && item.FileSizeBytes != result.Value.Size.Value))
+							{
+								item.ThumbnailPropertiesInitialized = false;
+							}
 							item.ItemDateModifiedReal = result.Value.Modified;
 							item.ItemDateCreatedReal = result.Value.Created;
 

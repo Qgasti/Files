@@ -599,6 +599,7 @@ namespace Files.App.Views.Layouts
 			await Task.WhenAll(filesAndFolders.Select(listedItem =>
 			{
 				listedItem.ItemPropertiesInitialized = false;
+				listedItem.ThumbnailPropertiesInitialized = false;
 				if (FileList.ContainerFromItem(listedItem) is not null)
 					return ParentShellPageInstance.ShellViewModel.LoadExtendedItemPropertiesAsync(listedItem);
 				else
