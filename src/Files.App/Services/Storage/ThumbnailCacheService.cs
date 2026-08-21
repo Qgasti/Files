@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,12 +13,17 @@ namespace Files.App.Services
 	internal sealed class ThumbnailCacheService : IThumbnailCacheService, IDisposable
 	{
 		private const int MaxConcurrentReads = 8;
+		private const int MaxTrackedCacheAccesses = 4096;
+		private const int CacheAccessTimeUpdateIntervalMinutes = 5;
 		private const string CacheFileExtension = ".thumb";
 
 		private readonly IUserSettingsService userSettingsService;
 		private readonly SemaphoreSlim cacheReadSemaphore = new(MaxConcurrentReads, MaxConcurrentReads);
 		private readonly SemaphoreSlim cacheIoSemaphore = new(1, 1);
+		private readonly ConcurrentDictionary<string, long> recentCacheAccesses = new(StringComparer.OrdinalIgnoreCase);
+		private readonly ConcurrentQueue<string> pendingAccessTimeUpdates = new();
 		private readonly string cacheDirectory = Path.Combine(ApplicationData.Current.LocalCacheFolder.Path, "Thumbnails");
+		private int accessTimeUpdateWorkerRunning;
 		private long trackedCacheSize = -1;
 
 		public ThumbnailCacheService(IUserSettingsService userSettingsService)
@@ -45,14 +51,8 @@ namespace Files.App.Services
 				if (data.Length == 0)
 					return null;
 
-				try
-				{
-					File.SetLastAccessTimeUtc(cachePath, DateTime.UtcNow);
-				}
-				catch (Exception ex)
-				{
-					App.Logger.LogDebug(ex, "Failed to update a persistent thumbnail cache access time.");
-				}
+				if (TryRecordCacheAccess(cachePath))
+					QueueAccessTimeUpdate(cachePath);
 
 				return data;
 			}
@@ -114,6 +114,7 @@ namespace Files.App.Services
 				}
 
 				trackedCacheSize = Math.Max(0, cacheSizeBeforeWrite - existingLength + data.LongLength);
+				RecordCacheAccess(cachePath);
 				if (trackedCacheSize > GetCacheSizeLimit())
 					TrimCore();
 			}
@@ -188,6 +189,10 @@ namespace Files.App.Services
 			}
 			finally
 			{
+				while (pendingAccessTimeUpdates.TryDequeue(out _))
+				{
+				}
+				recentCacheAccesses.Clear();
 				trackedCacheSize = -1;
 				cacheIoSemaphore.Release();
 			}
@@ -237,6 +242,81 @@ namespace Files.App.Services
 
 		private long CalculateCacheSizeCore()
 			=> EnumerateCacheFiles().Sum(file => file.Length);
+
+		private bool TryRecordCacheAccess(string cachePath)
+		{
+			var now = Stopwatch.GetTimestamp();
+			while (true)
+			{
+				if (recentCacheAccesses.TryGetValue(cachePath, out var previousAccess))
+				{
+					if (Stopwatch.GetElapsedTime(previousAccess) < TimeSpan.FromMinutes(CacheAccessTimeUpdateIntervalMinutes))
+						return false;
+
+					if (recentCacheAccesses.TryUpdate(cachePath, now, previousAccess))
+						return true;
+
+					continue;
+				}
+
+				if (recentCacheAccesses.TryAdd(cachePath, now))
+				{
+					TrimTrackedCacheAccesses();
+					return true;
+				}
+			}
+		}
+
+		private void RecordCacheAccess(string cachePath)
+		{
+			recentCacheAccesses[cachePath] = Stopwatch.GetTimestamp();
+			TrimTrackedCacheAccesses();
+		}
+
+		private void QueueAccessTimeUpdate(string cachePath)
+		{
+			pendingAccessTimeUpdates.Enqueue(cachePath);
+			StartAccessTimeUpdateWorker();
+		}
+
+		private void StartAccessTimeUpdateWorker()
+		{
+			if (Interlocked.CompareExchange(ref accessTimeUpdateWorkerRunning, 1, 0) == 0)
+				_ = Task.Run(ProcessAccessTimeUpdates);
+		}
+
+		private void ProcessAccessTimeUpdates()
+		{
+			try
+			{
+				while (pendingAccessTimeUpdates.TryDequeue(out var cachePath))
+				{
+					try
+					{
+						File.SetLastAccessTimeUtc(cachePath, DateTime.UtcNow);
+					}
+					catch (Exception ex)
+					{
+						App.Logger.LogDebug(ex, "Failed to update a persistent thumbnail cache access time.");
+					}
+				}
+			}
+			finally
+			{
+				Interlocked.Exchange(ref accessTimeUpdateWorkerRunning, 0);
+				if (!pendingAccessTimeUpdates.IsEmpty)
+					StartAccessTimeUpdateWorker();
+			}
+		}
+
+		private void TrimTrackedCacheAccesses()
+		{
+			if (recentCacheAccesses.Count <= MaxTrackedCacheAccesses)
+				return;
+
+			var oldestAccess = recentCacheAccesses.MinBy(entry => entry.Value);
+			recentCacheAccesses.TryRemove(oldestAccess.Key, out _);
+		}
 
 		private long GetCacheSizeLimit()
 			=> (long)(Math.Clamp(userSettingsService.GeneralSettingsService.ThumbnailCacheSizeLimit, 100d, 5000d) * 1024 * 1024);

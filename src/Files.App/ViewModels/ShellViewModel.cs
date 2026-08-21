@@ -1114,6 +1114,7 @@ namespace Files.App.ViewModels
 							if (cancellationToken.IsCancellationRequested)
 								return;
 							var collectionUpdateStartedTimestamp = Stopwatch.GetTimestamp();
+							var isFirstVisibleBatch = FilesAndFolders.Count == 0;
 
 							var comparer = SortingHelper.GetComparer(
 								folderSettings.DirectorySortOption,
@@ -1133,9 +1134,12 @@ namespace Files.App.ViewModels
 
 							loadMetrics?.RecordCollectionUpdate(incremental: true, visibleNewItems.Count, collectionUpdateStartedTimestamp);
 							loadMetrics?.RecordFirstBatch(FilesAndFolders.Count);
-							UpdateEmptyTextType();
-							UpdateNetworkAvailabilityInfoBar();
-							DirectoryInfoUpdated?.Invoke(this, EventArgs.Empty);
+							if (isFirstVisibleBatch)
+							{
+								UpdateEmptyTextType();
+								UpdateNetworkAvailabilityInfoBar();
+								DirectoryInfoUpdated?.Invoke(this, EventArgs.Empty);
+							}
 						}
 						finally
 						{

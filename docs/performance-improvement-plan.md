@@ -68,6 +68,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 ### Phase 3: Collection updates
 
 - [x] Append ungrouped, unfiltered intermediate batches without clearing or resetting already displayed items.
+- [x] Update directory summary, empty-state, and network-state UI on the first visible progressive batch and the final projection instead of repeating that work for every intermediate batch.
 - [x] Insert filtered intermediate and final-tail items using the active sort order without rebuilding already displayed items.
 - [x] Apply flat final projections with at most 64 single-item Add, Remove, or Move notifications; use one Reset for larger or wholly replaced projections.
 - [x] Add safe single-item updates for grouped intermediate and final projections, including Move-based member and group-header ordering.
@@ -94,6 +95,7 @@ The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does n
 - [x] Cancel queued persistent-cache writes when their item leaves the realized range or its folder load is superseded, without faulting fire-and-forget tasks canceled before acquiring the cache I/O semaphore.
 - [x] Limit persistent-cache reads to eight concurrent operations across tabs and propagate cancellation instead of treating a canceled disk read as a cache miss followed by a Shell fallback.
 - [x] Track cache size incrementally under the serialized write lock and perform a full LRU enumeration and sort only when the configured size limit is actually exceeded.
+- [x] Coalesce repeated persistent-cache LastAccessTime writes for five minutes per entry, bound the in-memory access index, and process allowed touches through one background worker.
 - [x] Limit lower-priority storage, cloud, tag, and media-property enrichment to four concurrent operations across tabs while allowing each realized item's thumbnail to load first.
 - [x] Prevent cloud thumbnail retries from replacing an active generated-thumbnail request or overlapping an existing timer retry, and avoid repeating icon-overlay Shell queries on thumbnail-only retries.
 
@@ -209,6 +211,15 @@ Every behavior-changing phase must satisfy all applicable gates:
 - Git repository path scans, validity checks, HEAD and branch reads, and shared LibGit2 payloads now execute on the thread pool. A cold `src` navigation spent 328.3 ms scanning parent paths and 69.7 ms reading HEAD, while the address-bar action returned in 78.5 ms and the window remained responsive throughout the background detection.
 - A LibGit2 `Repository.Discover` experiment was reverted: it increased the cold path scan from 240.1 ms to 305.9 ms and still used 62.0 ms warm, so the original recursive lookup remains in place with only its execution context changed.
 - During a System32-to-`src` rapid-navigation test, the obsolete System32 load canceled after 416 items with zero Reset notifications. The destination restored its 13-item snapshot in 10.8 ms, retained the correct Git repository context, and remained responsive.
+
+### 2026-08-21
+
+- Progressive enumeration now updates directory summary, empty-state, and network-state UI for the first visible batch and the final authoritative projection instead of repeating the same non-collection work for every intermediate batch. Collection publication frequency and the 32-item first batch are unchanged.
+- Against the same-day original System32 control run, three warmed runs reduced median intermediate UI wait from 1,631.6 ms to 1,535.3 ms and median enumeration time from 2,193.7 ms to 2,021.9 ms. Median complete-load time was 2,518.4 ms, all 4,911 items were shown with zero Reset notifications, and UI Automation confirmed the final status count.
+- A rapid System32-to-`src` navigation still canceled the obsolete load after 416 items. The destination remained responsive and its final status count was 13 items.
+- Single-threaded initialization and 32/128-item worker-partition experiments were reverted. Single-threading increased initialization to 754.9 ms, the 32-item partition did not produce a stable improvement, and the 128-item partition delayed cancellation until 4,896 obsolete items had been processed.
+- Persistent thumbnail-cache hits now update each entry's LastAccessTime at most once every five minutes per app process. The access index is bounded to 4,096 entries, newly stored thumbnails are recorded without another metadata write, and clearing the cache also clears the index and pending queue. Allowed touches run sequentially on one background worker, so thumbnail reads no longer wait for the metadata write.
+- In the 85-item AppTiles folder, the previous build rewrote LastAccessTime for 22 cache files on every refresh. The updated build touched the same 22 entries in the background on the first load of a new process, preserving LRU recency, then changed zero access times on immediate refreshes while the window remained responsive.
 
 ## Risks
 
