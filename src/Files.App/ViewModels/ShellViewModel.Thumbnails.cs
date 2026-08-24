@@ -20,13 +20,13 @@ namespace Files.App.ViewModels
 			try
 			{
 				var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
-				loadMetrics?.RecordShellThumbnailStarted();
 				return await FileThumbnailHelper.GetIconAsync(
 					path,
 					requestedSize,
 					isFolder,
 					options,
 					cancellationToken,
+					loadMetrics is null ? null : loadMetrics.RecordShellThumbnailStarted,
 					loadMetrics is null ? null : loadMetrics.RecordDetachedShellWork);
 			}
 			finally
@@ -41,11 +41,11 @@ namespace Files.App.ViewModels
 			try
 			{
 				var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
-				loadMetrics?.RecordShellThumbnailStarted();
 				return await FileThumbnailHelper.GetIconOverlayAsync(
 					path,
 					isFolder,
 					cancellationToken,
+					loadMetrics is null ? null : loadMetrics.RecordShellThumbnailStarted,
 					loadMetrics is null ? null : loadMetrics.RecordDetachedShellWork);
 			}
 			finally

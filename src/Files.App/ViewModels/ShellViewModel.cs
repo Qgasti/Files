@@ -1899,13 +1899,13 @@ namespace Files.App.ViewModels
 						byte[]? generatedResult;
 						try
 						{
-							loadMetrics?.RecordShellThumbnailStarted();
 							generatedResult = await FileThumbnailHelper.GetIconAsync(
 									item.ItemPath,
 									thumbnailSize,
 									item.IsFolder,
 									IconOptions.ReturnThumbnailOnly | (useCurrentScale ? IconOptions.UseCurrentScale : IconOptions.None),
 									generatedThumbnailToken,
+									loadMetrics is null ? null : loadMetrics.RecordShellThumbnailStarted,
 									loadMetrics is null ? null : loadMetrics.RecordDetachedShellWork);
 						}
 						finally
@@ -2365,13 +2365,13 @@ namespace Files.App.ViewModels
 			if (item.PrimaryItemAttribute != StorageItemTypes.Folder || item.IsArchive)
 			{
 				var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
-				loadMetrics?.RecordShellThumbnailStarted();
 				var result = await FileThumbnailHelper.GetIconAsync(
 					item.ItemPath,
 					Constants.ShellIconSizes.Large,
 					false,
 					IconOptions.ReturnIconOnly | IconOptions.UseCurrentScale,
 					cancellationToken,
+					loadMetrics is null ? null : loadMetrics.RecordShellThumbnailStarted,
 					loadMetrics is null ? null : loadMetrics.RecordDetachedShellWork);
 
 				if (result is not null && !item.IsShortcut)

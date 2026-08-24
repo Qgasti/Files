@@ -9,6 +9,10 @@ namespace Files.App.Utils.Storage
 {
 	public static class FileThumbnailHelper
 	{
+		private const int MaxConcurrentShellThumbnailWork = 8;
+
+		private static readonly SemaphoreSlim shellThumbnailWorkSemaphore = new(MaxConcurrentShellThumbnailWork, MaxConcurrentShellThumbnailWork);
+
 		/// <summary>
 		/// Returns icon or thumbnail for given file or folder
 		/// </summary>
@@ -18,6 +22,7 @@ namespace Files.App.Utils.Storage
 			bool isFolder,
 			IconOptions iconOptions,
 			CancellationToken cancellationToken = default,
+			Action? shellWorkStartedCallback = null,
 			Action<Task>? detachedShellWorkCallback = null)
 		{
 			cancellationToken.ThrowIfCancellationRequested();
@@ -39,10 +44,11 @@ namespace Files.App.Utils.Storage
 
 					if (!extension.Equals(".fon", StringComparison.OrdinalIgnoreCase))
 					{
-						var fontThumbnailTask = STATask.Run(
+						var fontThumbnail = await RunShellWorkAsync(
 							() => cancellationToken.IsCancellationRequested ? null : FontFileHelper.GenerateFontThumbnail(path, (int)size),
-							App.Logger);
-						var fontThumbnail = await WaitForStaResultAsync(fontThumbnailTask, cancellationToken, detachedShellWorkCallback);
+							cancellationToken,
+							shellWorkStartedCallback,
+							detachedShellWorkCallback);
 						cancellationToken.ThrowIfCancellationRequested();
 						if (fontThumbnail is not null)
 							return fontThumbnail;
@@ -54,10 +60,11 @@ namespace Files.App.Utils.Storage
 				? MtpHelpers.ResolveMtpShellPath(path) ?? path
 				: path;
 
-			var shellWork = STATask.Run(
+			var result = await RunShellWorkAsync(
 				() => cancellationToken.IsCancellationRequested ? null : Win32Helper.GetIcon(resolvedPath, (int)size, isFolder, iconOptions),
-				App.Logger);
-			var result = await WaitForStaResultAsync(shellWork, cancellationToken, detachedShellWorkCallback);
+				cancellationToken,
+				shellWorkStartedCallback,
+				detachedShellWorkCallback);
 			cancellationToken.ThrowIfCancellationRequested();
 			return result;
 		}
@@ -72,32 +79,57 @@ namespace Files.App.Utils.Storage
 			string path,
 			bool isFolder,
 			CancellationToken cancellationToken = default,
+			Action? shellWorkStartedCallback = null,
 			Action<Task>? detachedShellWorkCallback = null)
 		{
 			cancellationToken.ThrowIfCancellationRequested();
-			var shellWork = STATask.Run(
+			var result = await RunShellWorkAsync(
 				() => cancellationToken.IsCancellationRequested ? null : Win32Helper.GetIconOverlay(path, isFolder),
-				App.Logger);
-			var result = await WaitForStaResultAsync(shellWork, cancellationToken, detachedShellWorkCallback);
+				cancellationToken,
+				shellWorkStartedCallback,
+				detachedShellWorkCallback);
 			cancellationToken.ThrowIfCancellationRequested();
 			return result;
 		}
 
-		private static async Task<T> WaitForStaResultAsync<T>(
-			Task<T> shellWork,
+		private static async Task<T> RunShellWorkAsync<T>(
+			Func<T> shellWorkFactory,
 			CancellationToken cancellationToken,
+			Action? shellWorkStartedCallback,
 			Action<Task>? detachedShellWorkCallback)
 		{
+			await shellThumbnailWorkSemaphore.WaitAsync(cancellationToken);
+			var releaseWhenCompleted = false;
 			try
 			{
-				return await shellWork.WaitAsync(cancellationToken);
-			}
-			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-			{
-				if (!shellWork.IsCompleted)
-					detachedShellWorkCallback?.Invoke(shellWork);
+				cancellationToken.ThrowIfCancellationRequested();
+				var shellWork = STATask.Run(shellWorkFactory, App.Logger);
+				shellWorkStartedCallback?.Invoke();
+				try
+				{
+					return await shellWork.WaitAsync(cancellationToken);
+				}
+				catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+				{
+					if (!shellWork.IsCompleted)
+					{
+						releaseWhenCompleted = true;
+						_ = shellWork.ContinueWith(
+							static (_, state) => ((SemaphoreSlim)state!).Release(),
+							shellThumbnailWorkSemaphore,
+							CancellationToken.None,
+							TaskContinuationOptions.ExecuteSynchronously,
+							TaskScheduler.Default);
+						detachedShellWorkCallback?.Invoke(shellWork);
+					}
 
-				throw;
+					throw;
+				}
+			}
+			finally
+			{
+				if (!releaseWhenCompleted)
+					shellThumbnailWorkSemaphore.Release();
 			}
 		}
 
