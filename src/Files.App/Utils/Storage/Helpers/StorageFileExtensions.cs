@@ -3,7 +3,9 @@
 
 using System.Collections.Immutable;
 using System.IO;
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.Text;
+using Windows.Foundation;
 using Windows.Storage;
 using Windows.Storage.Search;
 
@@ -222,7 +224,7 @@ namespace Files.App.Utils.Storage
 			(string value, StorageFolderWithPath rootFolder = null, StorageFolderWithPath parentFolder = null)
 				=> (await DangerousGetFolderWithPathFromPathAsync(value, rootFolder, parentFolder)).Item;
 		public async static Task<StorageFolderWithPath> DangerousGetFolderWithPathFromPathAsync
-			(string value, StorageFolderWithPath rootFolder = null, StorageFolderWithPath parentFolder = null)
+			(string value, StorageFolderWithPath rootFolder = null, StorageFolderWithPath parentFolder = null, uint shellInitialItemCount = 0, CancellationToken cancellationToken = default)
 		{
 			// Archive paths can't be resolved by chaining WinRT GetFolderAsync from a network root/parent
 			// (an archive is not a real subfolder of the share); resolve them directly like local archives.
@@ -262,12 +264,37 @@ namespace Files.App.Utils.Storage
 			var fullPath = (parentFolder is not null && !FtpHelpers.IsFtpPath(value) && !Path.IsPathRooted(value) && !ShellStorageFolder.IsShellPath(value)) // "::{" not a valid root
 				? Path.GetFullPath(Path.Combine(parentFolder.Path, value)) // Relative path
 				: value;
-			var item = await BaseStorageFolder.GetFolderFromPathAsync(fullPath);
+			var item = shellInitialItemCount > 0 && ShellStorageFolder.IsShellPath(fullPath)
+				? await GetShellFolderWithInitialItemsAsync(fullPath, shellInitialItemCount, cancellationToken)
+				: await BaseStorageFolder.GetFolderFromPathAsync(fullPath);
 
 			if (parentFolder is not null && parentFolder.Item is IPasswordProtectedItem ppis && item is IPasswordProtectedItem ppid)
 				ppid.Credentials = ppis.Credentials;
 
 			return new StorageFolderWithPath(item);
+		}
+
+		private static async Task<BaseStorageFolder> GetShellFolderWithInitialItemsAsync(
+			string path,
+			uint maxItemsToRetrieve,
+			CancellationToken cancellationToken)
+		{
+			IAsyncOperation<BaseStorageFolder> operation = ShellStorageFolder.FromPathWithInitialItemsAsync(path, maxItemsToRetrieve);
+			var providerTask = operation.AsTask();
+			try
+			{
+				return await providerTask.WaitAsync(cancellationToken);
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				operation.Cancel();
+				_ = providerTask.ContinueWith(
+					static completedTask => _ = completedTask.Exception,
+					CancellationToken.None,
+					TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+					TaskScheduler.Default);
+				throw;
+			}
 		}
 		public async static Task<IList<StorageFolderWithPath>> GetFoldersWithPathAsync
 			(this StorageFolderWithPath parentFolder, uint maxNumberOfItems = uint.MaxValue)

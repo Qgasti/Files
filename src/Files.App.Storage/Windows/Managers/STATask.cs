@@ -19,7 +19,7 @@ namespace Files.App.Storage
 		/// <returns>A <see cref="Task"/> that represents the work scheduled to execute in the STA thread.</returns>
 		public static Task Run(Action action, ILogger? logger)
 		{
-			var tcs = new TaskCompletionSource();
+			var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
 			Thread thread =
 				new(() =>
@@ -58,7 +58,7 @@ namespace Files.App.Storage
 		/// <returns>A <see cref="Task"/> that represents the work scheduled to execute in the STA thread.</returns>
 		public static Task<T> Run<T>(Func<T> func, ILogger? logger)
 		{
-			var tcs = new TaskCompletionSource<T>();
+			var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
 
 			Thread thread =
 				new(() =>
@@ -95,7 +95,7 @@ namespace Files.App.Storage
 		/// <returns>A <see cref="Task"/> that represents the work scheduled to execute in the STA thread.</returns>
 		public static Task Run(Func<Task> func, ILogger? logger)
 		{
-			var tcs = new TaskCompletionSource();
+			var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
 			Thread thread =
 				new(async () =>
@@ -134,7 +134,7 @@ namespace Files.App.Storage
 		/// <returns>A <see cref="Task"/> that represents the work scheduled to execute in the STA thread.</returns>
 		public static Task<T?> Run<T>(Func<Task<T>> func, ILogger? logger)
 		{
-			var tcs = new TaskCompletionSource<T?>();
+			var tcs = new TaskCompletionSource<T?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
 			Thread thread =
 				new(async () =>

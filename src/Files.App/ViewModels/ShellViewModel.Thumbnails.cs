@@ -19,7 +19,15 @@ namespace Files.App.ViewModels
 			await initialThumbnailSemaphore.WaitAsync(cancellationToken);
 			try
 			{
-				return await FileThumbnailHelper.GetIconAsync(path, requestedSize, isFolder, options);
+				var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
+				loadMetrics?.RecordShellThumbnailStarted();
+				return await FileThumbnailHelper.GetIconAsync(
+					path,
+					requestedSize,
+					isFolder,
+					options,
+					cancellationToken,
+					loadMetrics is null ? null : loadMetrics.RecordDetachedShellWork);
 			}
 			finally
 			{
@@ -32,7 +40,13 @@ namespace Files.App.ViewModels
 			await initialThumbnailSemaphore.WaitAsync(cancellationToken);
 			try
 			{
-				return await FileThumbnailHelper.GetIconOverlayAsync(path, isFolder);
+				var loadMetrics = Volatile.Read(ref activeFolderLoadMetrics);
+				loadMetrics?.RecordShellThumbnailStarted();
+				return await FileThumbnailHelper.GetIconOverlayAsync(
+					path,
+					isFolder,
+					cancellationToken,
+					loadMetrics is null ? null : loadMetrics.RecordDetachedShellWork);
 			}
 			finally
 			{

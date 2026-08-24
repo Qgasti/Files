@@ -53,6 +53,7 @@ namespace Files.App.Utils.Storage
 		public override string DisplayType { get; }
 
 		public override DateTimeOffset DateCreated { get; }
+		internal BaseBasicProperties InitialBasicProperties { get; }
 
 		public override FileAttributes Attributes => FileAttributes.Normal | FileAttributes.ReadOnly;
 
@@ -65,6 +66,7 @@ namespace Files.App.Utils.Storage
 			Path = item.RecyclePath; // True path on disk
 			DateCreated = item.CreatedDate;
 			DisplayType = item.FileType;
+			InitialBasicProperties = new ShellFileBasicProperties(item);
 		}
 
 		public override IAsyncOperation<StorageFile> ToStorageFileAsync() => throw new NotSupportedException();

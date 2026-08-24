@@ -15,6 +15,8 @@ namespace Files.App.Data.Items
 	public sealed partial class DriveItem : ExpandableSidebarItemBase, INavigationControlItem, IFolder, IExpandableSidebarFolder
 	{
 		private readonly SemaphoreSlim thumbnailLoadSemaphore = new(1, 1);
+		private readonly object updatePropertiesLock = new();
+		private Task? updatePropertiesTask;
 
 		private BitmapImage icon;
 		public BitmapImage Icon
@@ -261,7 +263,7 @@ namespace Files.App.Data.Items
 			item.DeviceID = deviceId;
 			item.Root = root;
 
-			_ = MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(item.UpdatePropertiesAsync);
+			_ = SafetyExtensions.IgnoreExceptions(item.UpdatePropertiesAsync, App.Logger);
 
 			return item;
 		}
@@ -279,69 +281,123 @@ namespace Files.App.Data.Items
 			}
 		}
 
-		public async Task UpdatePropertiesAsync()
+		public Task UpdatePropertiesAsync()
+		{
+			lock (updatePropertiesLock)
+			{
+				if (updatePropertiesTask is { IsCompleted: false })
+					return updatePropertiesTask;
+
+				return updatePropertiesTask = UpdatePropertiesCoreAsync();
+			}
+		}
+
+		private async Task UpdatePropertiesCoreAsync()
 		{
 			try
 			{
-				// For cloud drives, try to get quota from the sync root provider first
-				if (Type == DriveType.CloudDrive)
+				DrivePropertiesResult result;
+				try
 				{
-					try
-					{
-						var syncRootStatus = await SyncRootHelpers.GetSyncRootQuotaAsync(Path);
-						if (syncRootStatus.Success)
-						{
-							MaxSpace = ByteSize.FromBytes(syncRootStatus.Capacity);
-							SpaceUsed = ByteSize.FromBytes(syncRootStatus.Used);
-							FreeSpace = MaxSpace - SpaceUsed;
-
-							SpaceText = GetSizeString();
-
-							if (MaxSpace.Bytes > 0)
-								PercentageUsed = 100.0f - (float)(FreeSpace.Bytes / MaxSpace.Bytes) * 100.0f;
-
-							OnPropertyChanged(nameof(ShowDriveDetails));
-							return;
-						}
-					}
-					catch { }
+					var root = Root;
+					var path = Path;
+					var type = Type;
+					result = await Task.Run(() => QueryDrivePropertiesAsync(root, path, type));
+				}
+				catch
+				{
+					result = DrivePropertiesResult.Unknown;
 				}
 
-				var properties = await Root.Properties.RetrievePropertiesAsync(["System.FreeSpace", "System.Capacity", "System.Volume.FileSystem"])
-					.AsTask().WithTimeoutAsync(TimeSpan.FromSeconds(5));
-
-				if (properties is not null && properties["System.Capacity"] is not null && properties["System.FreeSpace"] is not null)
-				{
-					MaxSpace = ByteSize.FromBytes((ulong)properties["System.Capacity"]);
-					FreeSpace = ByteSize.FromBytes((ulong)properties["System.FreeSpace"]);
-					SpaceUsed = MaxSpace - FreeSpace;
-
-					SpaceText = GetSizeString();
-
-					if (MaxSpace.Bytes > 0 && FreeSpace.Bytes > 0) // Make sure we don't divide by 0
-						PercentageUsed = 100.0f - (float)(FreeSpace.Bytes / MaxSpace.Bytes) * 100.0f;
-				}
-				else
-				{
-					SpaceText = Strings.Unknown.GetLocalizedResource();
-					MaxSpace = SpaceUsed = FreeSpace = ByteSize.FromBytes(0);
-				}
-
-				if (properties is not null && properties["System.Volume.FileSystem"] is not null)
-					Filesystem = (string)properties["System.Volume.FileSystem"];
-				else
-					Filesystem = string.Empty;
-
-				OnPropertyChanged(nameof(ShowDriveDetails));
+				await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() => ApplyDriveProperties(result));
 			}
-			catch (Exception)
+			finally
+			{
+				lock (updatePropertiesLock)
+					updatePropertiesTask = null;
+			}
+		}
+
+		private static async Task<DrivePropertiesResult> QueryDrivePropertiesAsync(StorageFolder root, string path, DriveType type)
+		{
+			// For cloud drives, try to get quota from the sync root provider first.
+			if (type == DriveType.CloudDrive)
+			{
+				try
+				{
+					var syncRootStatus = await SyncRootHelpers.GetSyncRootQuotaAsync(path);
+					if (syncRootStatus.Success)
+					{
+						var maxSpace = ByteSize.FromBytes(syncRootStatus.Capacity);
+						var spaceUsed = ByteSize.FromBytes(syncRootStatus.Used);
+						return new(maxSpace, maxSpace - spaceUsed, null, true, true);
+					}
+				}
+				catch
+				{
+				}
+			}
+
+			var properties = await root.Properties.RetrievePropertiesAsync(["System.FreeSpace", "System.Capacity", "System.Volume.FileSystem"])
+				.AsTask().WithTimeoutAsync(TimeSpan.FromSeconds(5));
+			ulong capacity = 0;
+			ulong freeSpace = 0;
+			var hasCapacity = false;
+			if (properties is not null &&
+				properties.TryGetValue("System.Capacity", out var capacityValue) && capacityValue is ulong parsedCapacity &&
+				properties.TryGetValue("System.FreeSpace", out var freeSpaceValue) && freeSpaceValue is ulong parsedFreeSpace)
+			{
+				capacity = parsedCapacity;
+				freeSpace = parsedFreeSpace;
+				hasCapacity = true;
+			}
+			var filesystem = properties is not null &&
+				properties.TryGetValue("System.Volume.FileSystem", out var filesystemValue) && filesystemValue is string value
+					? value
+					: string.Empty;
+
+			return hasCapacity
+				? new(ByteSize.FromBytes(capacity), ByteSize.FromBytes(freeSpace), filesystem, true, false)
+				: new(ByteSize.FromBytes(0), ByteSize.FromBytes(0), filesystem, false, false);
+		}
+
+		private void ApplyDriveProperties(DrivePropertiesResult result)
+		{
+			if (result.HasCapacity)
+			{
+				MaxSpace = result.MaxSpace;
+				FreeSpace = result.FreeSpace;
+				SpaceUsed = MaxSpace - FreeSpace;
+				SpaceText = GetSizeString();
+
+				if (MaxSpace.Bytes > 0 && (result.IsCloudQuota || FreeSpace.Bytes > 0))
+					PercentageUsed = 100.0f - (float)(FreeSpace.Bytes / MaxSpace.Bytes) * 100.0f;
+			}
+			else
 			{
 				SpaceText = Strings.Unknown.GetLocalizedResource();
 				MaxSpace = SpaceUsed = FreeSpace = ByteSize.FromBytes(0);
-				Filesystem = string.Empty;
-
-				OnPropertyChanged(nameof(ShowDriveDetails));
 			}
+
+			if (!result.IsCloudQuota)
+				Filesystem = result.Filesystem ?? string.Empty;
+
+			OnPropertyChanged(nameof(ShowDriveDetails));
+		}
+
+		private sealed record DrivePropertiesResult(
+			ByteSize MaxSpace,
+			ByteSize FreeSpace,
+			string? Filesystem,
+			bool HasCapacity,
+			bool IsCloudQuota)
+		{
+			public static DrivePropertiesResult Unknown { get; } = new(
+				ByteSize.FromBytes(0),
+				ByteSize.FromBytes(0),
+				string.Empty,
+				false,
+				false);
 		}
 
 		public async IAsyncEnumerable<IStorableChild> GetItemsAsync(StorableType storableType = StorableType.All, [EnumeratorCancellation] CancellationToken cancellationToken = default)

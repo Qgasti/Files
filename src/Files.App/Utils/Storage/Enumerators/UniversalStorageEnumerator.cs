@@ -6,12 +6,27 @@ using Files.Shared.Helpers;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml.Media.Imaging;
 using System.IO;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Windows.Foundation;
 using Windows.Storage;
 
 namespace Files.App.Utils.Storage
 {
 	public static class UniversalStorageEnumerator
 	{
+		public readonly record struct PerformanceTimings(
+			int ItemCount,
+			long TotalElapsedTicks,
+			long ProviderFetchElapsedTicks,
+			long ProviderFetchWaitTicks,
+			long ItemInitializationWaitTicks,
+			long PostProcessingTicks,
+			long IntermediateUpdateWaitTicks);
+
+		private const int MaxConcurrentItemInitializations = 8;
+		private const int MaxIntermediateBatchSize = 300;
+		private const int MaxZipIntermediateBatchSize = 1000;
+
 		private static readonly ISizeProvider folderSizeProvider = Ioc.Default.GetService<ISizeProvider>();
 
 		public static async Task<List<ListedItem>> ListEntries(
@@ -20,21 +35,35 @@ namespace Files.App.Utils.Storage
 			CancellationToken cancellationToken,
 			int countLimit,
 			Func<List<ListedItem>, Task> intermediateAction,
-			Dictionary<string, BitmapImage> defaultIconPairs = null)
+			Dictionary<string, BitmapImage> defaultIconPairs = null,
+			Action<PerformanceTimings>? performanceCallback = null)
 		{
+			var startedTimestamp = Stopwatch.GetTimestamp();
+			long providerFetchElapsedTicks = 0;
+			long providerFetchWaitTicks = 0;
+			long itemInitializationWaitTicks = 0;
+			long postProcessingTicks = 0;
+			long intermediateUpdateWaitTicks = 0;
 			var sampler = new IntervalSampler(500);
 			var tempList = new List<ListedItem>();
-			uint count = 0;
+			uint sourceOffset = 0;
+			var listedItemCount = 0;
 			var firstRound = true;
+			var firstBatchPublished = false;
+			Task<IReadOnlyList<IStorageItem>>? prefetchedPageTask = null;
+			IReadOnlyList<IStorageItem>? fullProviderItemList = null;
+			var providerRequiresFullList = rootFolder is ZipStorageFolder or FtpStorageFolder;
+			var followupPageSize = rootFolder is ZipStorageFolder ? MaxZipIntermediateBatchSize : MaxIntermediateBatchSize;
 
 			IUserSettingsService userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
 			bool calculateFolderSizes = userSettingsService.FoldersSettingsService.CalculateFolderSizes;
 
 			while (true)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				IReadOnlyList<IStorageItem> items;
 
-				uint maxItemsToRetrieve = 300;
+				uint maxItemsToRetrieve = (uint)followupPageSize;
 
 				if (intermediateAction is null)
 				{
@@ -49,7 +78,18 @@ namespace Files.App.Utils.Storage
 
 				try
 				{
-					items = await rootFolder.GetItemsAsync(count, maxItemsToRetrieve);
+					var pageTask = prefetchedPageTask;
+					prefetchedPageTask = null;
+					var providerWaitStartedTimestamp = Stopwatch.GetTimestamp();
+					try
+					{
+						items = await (pageTask ?? FetchPageAsync(sourceOffset, maxItemsToRetrieve));
+					}
+					finally
+					{
+						providerFetchWaitTicks += Stopwatch.GetTimestamp() - providerWaitStartedTimestamp;
+					}
+
 					if (items is null || items.Count == 0)
 					{
 						break;
@@ -69,7 +109,7 @@ namespace Files.App.Utils.Storage
 					(uint)ex.HResult == 0x80070490) // ERROR_NOT_FOUND
 				{
 					// If some unexpected exception is thrown - enumerate this folder file by file - just to be sure
-					items = await EnumerateFileByFile(rootFolder, count, maxItemsToRetrieve);
+					items = await EnumerateFileByFile(rootFolder, sourceOffset, maxItemsToRetrieve, cancellationToken);
 				}
 				catch (Exception ex)
 				{
@@ -78,87 +118,155 @@ namespace Files.App.Utils.Storage
 					break;
 				}
 
-				foreach (var item in items)
+				var nextSourceOffset = sourceOffset + maxItemsToRetrieve;
+				if (countLimit < 0 || nextSourceOffset < countLimit)
 				{
-					var startWithDot = item.Name.StartsWith('.');
-					if (!startWithDot || userSettingsService.FoldersSettingsService.ShowDotFiles)
-					{
-						if (item.IsOfType(StorageItemTypes.Folder))
-						{
-							var folder = await AddFolderAsync(item.AsBaseStorageFolder(), currentStorageFolder, cancellationToken);
-							if (folder is not null)
-							{
-								if (defaultIconPairs?.ContainsKey(string.Empty) ?? false)
-									folder.FileImage = defaultIconPairs[string.Empty];
-
-								tempList.Add(folder);
-
-								// The size provider enumerates with Win32, which reports size 0 for
-								// virtual paths (ftp, archives) it cannot traverse; skip those
-								if (calculateFolderSizes && FolderHelpers.CheckFolderAccessWithWin32(folder.ItemPath))
-								{
-									if (folderSizeProvider.TryGetSize(folder.ItemPath, out var size))
-									{
-										folder.FileSizeBytes = (long)size;
-										folder.FileSize = size.ToSizeString();
-									}
-
-									_ = folderSizeProvider.UpdateAsync(folder.ItemPath, cancellationToken);
-								}
-							}
-						}
-						else
-						{
-							var fileEntry = await AddFileAsync(item.AsBaseStorageFile(), currentStorageFolder, cancellationToken);
-							if (fileEntry is not null)
-							{
-								if (defaultIconPairs is not null)
-								{
-									if (!string.IsNullOrEmpty(fileEntry.FileExtension))
-									{
-										var lowercaseExtension = fileEntry.FileExtension.ToLowerInvariant();
-
-										if (defaultIconPairs.TryGetValue(lowercaseExtension, out BitmapImage? image))
-											fileEntry.FileImage = image;
-									}
-								}
-
-								tempList.Add(fileEntry);
-							}
-						}
-					}
-
-					if (cancellationToken.IsCancellationRequested)
-						break;
+					var nextPageSize = intermediateAction is null ? 1000u : (uint)followupPageSize;
+					prefetchedPageTask = FetchPageAsync(nextSourceOffset, nextPageSize);
+					_ = prefetchedPageTask.ContinueWith(
+						static completedTask => _ = completedTask.Exception,
+						CancellationToken.None,
+						TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+						TaskScheduler.Default);
 				}
 
-				count += maxItemsToRetrieve;
-
-				if (countLimit > -1 && count >= countLimit)
-					break;
-
-				if (intermediateAction is not null && (items.Count == maxItemsToRetrieve || sampler.CheckNow()))
+				for (var batchStart = 0; batchStart < items.Count; batchStart += MaxConcurrentItemInitializations)
 				{
-					await intermediateAction(tempList);
+					cancellationToken.ThrowIfCancellationRequested();
+					var pendingItems = new List<Task<ListedItem>>(MaxConcurrentItemInitializations);
+					var batchEnd = Math.Min(batchStart + MaxConcurrentItemInitializations, items.Count);
+					for (var itemIndex = batchStart; itemIndex < batchEnd; itemIndex++)
+					{
+						var item = items[itemIndex];
+						if (!item.Name.StartsWith('.') || userSettingsService.FoldersSettingsService.ShowDotFiles)
+							pendingItems.Add(CreateListedItemAsync(item));
+					}
 
-					// clear the temporary list every time we do an intermediate action
-					tempList.Clear();
+					if (pendingItems.Count > 0)
+					{
+						var initializationStartedTimestamp = Stopwatch.GetTimestamp();
+						var resolvedItems = await Task.WhenAll(pendingItems);
+						itemInitializationWaitTicks += Stopwatch.GetTimestamp() - initializationStartedTimestamp;
+						cancellationToken.ThrowIfCancellationRequested();
+
+						var postProcessingStartedTimestamp = Stopwatch.GetTimestamp();
+						foreach (var listedItem in resolvedItems)
+						{
+							if (listedItem is null)
+								continue;
+
+							ApplyInitialIcon(listedItem);
+							ApplyFolderSize(listedItem);
+							tempList.Add(listedItem);
+							++listedItemCount;
+						}
+						postProcessingTicks += Stopwatch.GetTimestamp() - postProcessingStartedTimestamp;
+					}
+
+					await PublishIntermediateItemsAsync();
+				}
+
+				sourceOffset += maxItemsToRetrieve;
+
+				if (countLimit > -1 && sourceOffset >= countLimit)
+					break;
+			}
+
+			performanceCallback?.Invoke(new(
+				listedItemCount,
+				Stopwatch.GetTimestamp() - startedTimestamp,
+				providerFetchElapsedTicks,
+				providerFetchWaitTicks,
+				itemInitializationWaitTicks,
+				postProcessingTicks,
+				intermediateUpdateWaitTicks));
+			return tempList;
+
+			async Task<IReadOnlyList<IStorageItem>> FetchPageAsync(uint offset, uint pageSize)
+			{
+				var providerFetchStartedTimestamp = Stopwatch.GetTimestamp();
+				try
+				{
+					if (providerRequiresFullList)
+					{
+						fullProviderItemList ??= await AwaitProviderOperationAsync(rootFolder.GetItemsAsync(), cancellationToken);
+						return fullProviderItemList
+							.Skip((int)offset)
+							.Take((int)pageSize)
+							.ToList();
+					}
+
+					return await AwaitProviderOperationAsync(rootFolder.GetItemsAsync(offset, pageSize), cancellationToken);
+				}
+				finally
+				{
+					Interlocked.Add(ref providerFetchElapsedTicks, Stopwatch.GetTimestamp() - providerFetchStartedTimestamp);
 				}
 			}
 
-			return tempList;
+			Task<ListedItem> CreateListedItemAsync(IStorageItem item)
+				=> item.IsOfType(StorageItemTypes.Folder)
+					? AddFolderAsync(item.AsBaseStorageFolder(), currentStorageFolder, cancellationToken)
+					: AddFileAsync(item.AsBaseStorageFile(), currentStorageFolder, cancellationToken);
+
+			void ApplyInitialIcon(ListedItem listedItem)
+			{
+				if (listedItem.IsFolder)
+				{
+					if (defaultIconPairs?.TryGetValue(string.Empty, out var folderIcon) ?? false)
+						listedItem.FileImage = folderIcon;
+				}
+				else if (defaultIconPairs is not null && !string.IsNullOrEmpty(listedItem.FileExtension) &&
+					defaultIconPairs.TryGetValue(listedItem.FileExtension.ToLowerInvariant(), out var fileIcon))
+				{
+					listedItem.FileImage = fileIcon;
+				}
+			}
+
+			void ApplyFolderSize(ListedItem listedItem)
+			{
+				if (!calculateFolderSizes || !listedItem.IsFolder || !FolderHelpers.CheckFolderAccessWithWin32(listedItem.ItemPath))
+					return;
+
+				if (folderSizeProvider.TryGetSize(listedItem.ItemPath, out var size))
+				{
+					listedItem.FileSizeBytes = (long)size;
+					listedItem.FileSize = size.ToSizeString();
+				}
+
+				_ = folderSizeProvider.UpdateAsync(listedItem.ItemPath, cancellationToken);
+			}
+
+			async Task PublishIntermediateItemsAsync()
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+				if (intermediateAction is null || tempList.Count == 0 ||
+					(firstBatchPublished || listedItemCount < 32) && tempList.Count < followupPageSize && !sampler.CheckNow())
+				{
+					return;
+				}
+
+				var updateStartedTimestamp = Stopwatch.GetTimestamp();
+				await intermediateAction(tempList);
+				intermediateUpdateWaitTicks += Stopwatch.GetTimestamp() - updateStartedTimestamp;
+				cancellationToken.ThrowIfCancellationRequested();
+				_ = sampler.CheckNow();
+				tempList.Clear();
+				firstBatchPublished = true;
+			}
 		}
 
-		private static async Task<IReadOnlyList<IStorageItem>> EnumerateFileByFile(BaseStorageFolder rootFolder, uint startFrom, uint itemsToIterate)
+		private static async Task<IReadOnlyList<IStorageItem>> EnumerateFileByFile(BaseStorageFolder rootFolder, uint startFrom, uint itemsToIterate, CancellationToken cancellationToken)
 		{
 			var tempList = new List<IStorageItem>();
 
 			for (var i = startFrom; i < startFrom + itemsToIterate; i++)
 			{
+				cancellationToken.ThrowIfCancellationRequested();
 				IStorageItem item;
 				try
 				{
-					var results = await rootFolder.GetItemsAsync(i, 1);
+					var results = await AwaitProviderOperationAsync(rootFolder.GetItemsAsync(i, 1), cancellationToken);
 
 					item = results?.FirstOrDefault();
 					if (item is null)
@@ -187,12 +295,38 @@ namespace Files.App.Utils.Storage
 			return tempList;
 		}
 
+		private static async Task<T> AwaitProviderOperationAsync<T>(IAsyncOperation<T> operation, CancellationToken cancellationToken)
+		{
+			var providerTask = operation.AsTask();
+			try
+			{
+				return await providerTask.WaitAsync(cancellationToken);
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				operation.Cancel();
+				_ = providerTask.ContinueWith(
+					static completedTask => _ = completedTask.Exception,
+					CancellationToken.None,
+					TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+					TaskScheduler.Default);
+				throw;
+			}
+		}
+
 		public static async Task<ListedItem> AddFolderAsync(
 			BaseStorageFolder folder,
 			StorageFolderWithPath currentStorageFolder,
 			CancellationToken cancellationToken)
 		{
-			var basicProperties = await folder.GetBasicPropertiesAsync();
+			var basicProperties = folder switch
+			{
+				ShellStorageFolder shellFolder => shellFolder.InitialBasicProperties,
+				ZipStorageFolder { InitialBasicProperties: not null } zipFolder => zipFolder.InitialBasicProperties,
+				FtpStorageFolder { InitialBasicProperties: not null } ftpFolder => ftpFolder.InitialBasicProperties,
+				_ => await AwaitProviderOperationAsync(folder.GetBasicPropertiesAsync(), cancellationToken)
+			};
+			cancellationToken.ThrowIfCancellationRequested();
 			if (!cancellationToken.IsCancellationRequested)
 			{
 				if (folder is ShortcutStorageFolder linkFolder)
@@ -266,7 +400,14 @@ namespace Files.App.Utils.Storage
 			StorageFolderWithPath currentStorageFolder,
 			CancellationToken cancellationToken)
 		{
-			var basicProperties = await file.GetBasicPropertiesAsync();
+			var basicProperties = file switch
+			{
+				ShellStorageFile shellFile => shellFile.InitialBasicProperties,
+				ZipStorageFile { InitialBasicProperties: not null } zipFile => zipFile.InitialBasicProperties,
+				FtpStorageFile { InitialBasicProperties: not null } ftpFile => ftpFile.InitialBasicProperties,
+				_ => await AwaitProviderOperationAsync(file.GetBasicPropertiesAsync(), cancellationToken)
+			};
+			cancellationToken.ThrowIfCancellationRequested();
 			// Display name does not include extension
 			var itemName = file.Name;
 			var itemModifiedDate = basicProperties.DateModified;

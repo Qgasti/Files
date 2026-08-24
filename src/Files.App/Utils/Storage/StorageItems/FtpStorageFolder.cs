@@ -27,6 +27,8 @@ namespace Files.App.Utils.Storage
 
 		public StorageCredential Credentials { get; set; }
 
+		internal BaseBasicProperties? InitialBasicProperties { get; }
+
 		public Func<IPasswordProtectedItem, Task<StorageCredential>> PasswordRequestedCallback { get; set; }
 
 		public FtpStorageFolder(string path, string name, DateTimeOffset dateCreated)
@@ -42,6 +44,7 @@ namespace Files.App.Utils.Storage
 			Name = ftpItem.Name;
 			FtpPath = FtpHelpers.GetFtpPath(Path);
 			DateCreated = ftpItem.RawCreated < DateTime.FromFileTimeUtc(0) ? DateTimeOffset.MinValue : ftpItem.RawCreated;
+			InitialBasicProperties = new FtpFolderBasicProperties(ftpItem);
 		}
 		public FtpStorageFolder(IStorageItemWithPath item)
 		{
@@ -71,12 +74,12 @@ namespace Files.App.Utils.Storage
 			return AsyncInfo.Run((cancellationToken) => SafetyExtensions.Wrap(async () =>
 			{
 				using var ftpClient = GetFtpClient();
-				if (!await ftpClient.EnsureConnectedAsync())
+				if (!await ftpClient.EnsureConnectedAsync(cancellationToken))
 				{
 					return new BaseBasicProperties();
 				}
 
-				var item = await ftpClient.GetObjectInfo(FtpPath);
+				var item = await ftpClient.GetObjectInfo(FtpPath, token: cancellationToken);
 				return item is null ? new BaseBasicProperties() : new FtpFolderBasicProperties(item);
 			}, (_, _) => Task.FromResult(new BaseBasicProperties())));
 		}
@@ -86,12 +89,14 @@ namespace Files.App.Utils.Storage
 			return AsyncInfo.Run((cancellationToken) => SafetyExtensions.Wrap<IStorageItem>(async () =>
 			{
 				using var ftpClient = GetFtpClient();
-				if (!await ftpClient.EnsureConnectedAsync())
+				if (!await ftpClient.EnsureConnectedAsync(cancellationToken))
 				{
 					return null;
 				}
 
-				var item = await ftpClient.GetObjectInfo(FtpHelpers.GetFtpPath(PathNormalization.Combine(Path, name)));
+				var item = await ftpClient.GetObjectInfo(
+					FtpHelpers.GetFtpPath(PathNormalization.Combine(Path, name)),
+					token: cancellationToken);
 				if (item is not null)
 				{
 					if (item.Type is FtpObjectType.File)
@@ -129,13 +134,13 @@ namespace Files.App.Utils.Storage
 			return AsyncInfo.Run((cancellationToken) => SafetyExtensions.Wrap<IReadOnlyList<IStorageItem>>(async () =>
 			{
 				using var ftpClient = GetFtpClient();
-				if (!await ftpClient.EnsureConnectedAsync())
+				if (!await ftpClient.EnsureConnectedAsync(cancellationToken))
 				{
 					return null;
 				}
 
 				var items = new List<IStorageItem>();
-				var list = await ftpClient.GetListing(FtpPath);
+				var list = await ftpClient.GetListing(FtpPath, cancellationToken);
 				foreach (var item in list)
 				{
 					if (item.Type is FtpObjectType.File)

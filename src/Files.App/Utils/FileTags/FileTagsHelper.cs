@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.UI.Xaml.Controls;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Foundation.Metadata;
 using Windows.Storage;
 using Windows.Storage.FileProperties;
@@ -136,18 +137,18 @@ namespace Files.App.Utils.FileTags
 
 		public static ulong? GetFileFRN(string filePath) => Win32Helper.GetFileFRN(filePath);
 
-		public static Task<ulong?> GetFileFRN(IStorageItem item)
+		public static Task<ulong?> GetFileFRN(IStorageItem item, CancellationToken cancellationToken = default)
 		{
 			return item switch
 			{
-				BaseStorageFolder { Properties: not null } folder => GetFileFRN(folder.Properties),
-				BaseStorageFile { Properties: not null } file => GetFileFRN(file.Properties),
+				BaseStorageFolder { Properties: not null } folder => GetFileFRN(folder.Properties, cancellationToken),
+				BaseStorageFile { Properties: not null } file => GetFileFRN(file.Properties, cancellationToken),
 				_ => Task.FromResult<ulong?>(null),
 			};
 
-			static async Task<ulong?> GetFileFRN(IStorageItemExtraProperties properties)
+			static async Task<ulong?> GetFileFRN(IStorageItemExtraProperties properties, CancellationToken cancellationToken)
 			{
-				var extra = await properties.RetrievePropertiesAsync(["System.FileFRN"]);
+				var extra = await properties.RetrievePropertiesAsync(["System.FileFRN"]).AsTask(cancellationToken);
 				return (ulong?)extra["System.FileFRN"];
 			}
 		}

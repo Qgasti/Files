@@ -45,6 +45,8 @@ namespace Files.App.Utils.Storage
 			}
 		}
 
+		internal BaseBasicProperties? InitialBasicProperties { get; }
+
 		internal static bool TryGetEncodingForContainerPath(string containerPath, out Encoding? encoding)
 			=> _encodingByContainerPath.TryGetValue(containerPath, out encoding);
 
@@ -77,7 +79,11 @@ namespace Files.App.Utils.Storage
 		public ZipStorageFolder(string path, string containerPath, BaseStorageFile backingFile) : this(path, containerPath)
 			=> this.backingFile = backingFile;
 		public ZipStorageFolder(string path, string containerPath, ArchiveFileInfo entry) : this(path, containerPath)
-			=> DateCreated = entry.CreationTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.CreationTime;
+		{
+			DateCreated = entry.CreationTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.CreationTime;
+			if (IsExactEntryPath(path, containerPath, entry.FileName))
+				InitialBasicProperties = new ZipFolderBasicProperties(entry);
+		}
 		public ZipStorageFolder(BaseStorageFile backingFile)
 		{
 			ArgumentException.ThrowIfNullOrEmpty(backingFile.Path);
@@ -89,6 +95,16 @@ namespace Files.App.Utils.Storage
 		}
 		public ZipStorageFolder(string path, string containerPath, ArchiveFileInfo entry, BaseStorageFile backingFile) : this(path, containerPath, entry)
 			=> this.backingFile = backingFile;
+		public ZipStorageFolder(string path, string containerPath, ZipEntry entry, BaseStorageFile backingFile) : this(path, containerPath, backingFile)
+		{
+			if (IsExactEntryPath(path, containerPath, entry.Name))
+				InitialBasicProperties = new ZipFolderBasicPropertiesWithEncoding(entry);
+		}
+
+		private static bool IsExactEntryPath(string path, string containerPath, string entryName)
+			=> System.IO.Path.Combine(System.IO.Path.GetFullPath(containerPath), entryName.Replace('/', '\\'))
+				.TrimEnd('\\', '/')
+				.Equals(path.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
 
 		public static string? GetContainerPath(string path)
 		{
@@ -409,14 +425,14 @@ namespace Files.App.Utils.Storage
 						var itemPath = System.IO.Path.Combine(Path, split[0]);
 						if (!items.Any(x => x.Path == itemPath))
 						{
-							var folder = new ZipStorageFolder(itemPath, containerPath, backingFile);
+							var folder = new ZipStorageFolder(itemPath, containerPath, entry, backingFile);
 							((IPasswordProtectedItem)folder).CopyFrom(this);
 							items.Add(folder);
 						}
 					}
 					else
 					{
-						var file = new ZipStorageFile(winPath, containerPath, backingFile);
+						var file = new ZipStorageFile(winPath, containerPath, entry, backingFile);
 						((IPasswordProtectedItem)file).CopyFrom(this);
 						file.CurrentEncoding = CurrentEncoding;
 						items.Add(file);
@@ -836,28 +852,33 @@ namespace Files.App.Utils.Storage
 
 		private sealed partial class ZipFolderBasicProperties : BaseBasicProperties
 		{
-			private ArchiveFileInfo entry;
+			public ZipFolderBasicProperties(ArchiveFileInfo entry)
+			{
+				DateModified = entry.LastWriteTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.LastWriteTime;
+				DateCreated = entry.CreationTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.CreationTime;
+				Size = entry.Size;
+			}
 
-			public ZipFolderBasicProperties(ArchiveFileInfo entry) => this.entry = entry;
+			public override DateTimeOffset DateModified { get; }
 
-			public override DateTimeOffset DateModified => entry.LastWriteTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.LastWriteTime;
+			public override DateTimeOffset DateCreated { get; }
 
-			public override DateTimeOffset DateCreated => entry.CreationTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.CreationTime;
-
-			public override ulong Size => entry.Size;
+			public override ulong Size { get; }
 		}
 
 		private sealed partial class ZipFolderBasicPropertiesWithEncoding : BaseBasicProperties
 		{
-			private ZipEntry entry;
+			public ZipFolderBasicPropertiesWithEncoding(ZipEntry entry)
+			{
+				DateModified = entry.DateTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.DateTime;
+				Size = (ulong)entry.Size;
+			}
 
-			public ZipFolderBasicPropertiesWithEncoding(ZipEntry entry) => this.entry = entry;
-
-			public override DateTimeOffset DateModified => entry.DateTime == DateTime.MinValue ? DateTimeOffset.MinValue : entry.DateTime;
+			public override DateTimeOffset DateModified { get; }
 
 			public override DateTimeOffset DateCreated => DateTimeOffset.MinValue;
 
-			public override ulong Size => (ulong)entry.Size;
+			public override ulong Size { get; }
 		}
 	}
 }

@@ -42,6 +42,8 @@ namespace Files.App.Utils.Storage
 
 		public StorageCredential Credentials { get; set; }
 
+		internal BaseBasicProperties? InitialBasicProperties { get; }
+
 		public Func<IPasswordProtectedItem, Task<StorageCredential>> PasswordRequestedCallback { get; set; }
 
 		public FtpStorageFile(string path, string name, DateTimeOffset dateCreated)
@@ -57,6 +59,7 @@ namespace Files.App.Utils.Storage
 			Name = ftpItem.Name;
 			FtpPath = FtpHelpers.GetFtpPath(Path);
 			DateCreated = ftpItem.RawCreated < DateTime.FromFileTimeUtc(0) ? DateTimeOffset.MinValue : ftpItem.RawCreated;
+			InitialBasicProperties = new FtpFileBasicProperties(ftpItem);
 		}
 		public FtpStorageFile(IStorageItemWithPath item)
 		{
@@ -83,12 +86,12 @@ namespace Files.App.Utils.Storage
 			return AsyncInfo.Run((cancellationToken) => SafetyExtensions.Wrap(async () =>
 			{
 				using var ftpClient = GetFtpClient();
-				if (!await ftpClient.EnsureConnectedAsync())
+				if (!await ftpClient.EnsureConnectedAsync(cancellationToken))
 				{
 					return new BaseBasicProperties();
 				}
 
-				var item = await ftpClient.GetObjectInfo(FtpPath);
+				var item = await ftpClient.GetObjectInfo(FtpPath, token: cancellationToken);
 				return item is null ? new BaseBasicProperties() : new FtpFileBasicProperties(item);
 			}, (_, _) => Task.FromResult(new BaseBasicProperties())));
 		}

@@ -166,6 +166,7 @@ namespace Files.App.Utils.Storage
 			if (GroupedCollection is null)
 				return;
 
+			var itemsByKey = new Dictionary<string, List<T>>(StringComparer.Ordinal);
 			foreach (var item in items)
 			{
 				if (token.IsCancellationRequested)
@@ -175,45 +176,103 @@ namespace Files.App.Utils.Storage
 				if (key is null)
 					continue;
 
-				var gp = GroupedCollection?.FirstOrDefault(x => x.Model.Key == key);
 				if (item is IGroupableItem groupable)
 					groupable.Key = key;
 
+				if (!itemsByKey.TryGetValue(key, out var groupedItems))
+				{
+					groupedItems = [];
+					itemsByKey.Add(key, groupedItems);
+				}
+
+				groupedItems.Add(item);
+			}
+
+			foreach (var (key, groupedItems) in itemsByKey)
+			{
+				if (token.IsCancellationRequested)
+					return;
+
+				var gp = GroupedCollection.FirstOrDefault(x => x.Model.Key == key);
 				if (gp is not null)
 				{
-					gp.Add(item);
+					if (groupedItems.Count == 1)
+						gp.Add(groupedItems[0]);
+					else
+						gp.AddRange(groupedItems);
 					gp.IsSorted = false;
 				}
 				else
 				{
-					var group = new GroupedCollection<T>(key)
-					{
-						item
-					};
+					var group = new GroupedCollection<T>(key);
+					if (groupedItems.Count == 1)
+						group.Add(groupedItems[0]);
+					else
+						group.AddRange(groupedItems);
 
 					group.GetExtendedGroupHeaderInfo = GetExtendedGroupHeaderInfo;
 					if (GetGroupHeaderInfo is not null)
 						GetGroupHeaderInfo.Invoke(group);
 
-					GroupedCollection?.Add(group);
-					GroupedCollection!.IsSorted = false;
+					GroupedCollection.Add(group);
+					GroupedCollection.IsSorted = false;
 				}
 			}
 		}
 
 		private void RemoveItemsFromGroup(IEnumerable<T> items)
 		{
+			if (GroupedCollection is null)
+				return;
+
+			var itemsByKey = new Dictionary<string, List<T>>(StringComparer.Ordinal);
 			foreach (var item in items)
 			{
 				var key = GetGroupKeyForItem(item);
+				if (key is null)
+					continue;
 
-				var group = GroupedCollection?.Where(x => x.Model.Key == key).FirstOrDefault();
-				if (group is not null)
+				if (!itemsByKey.TryGetValue(key, out var groupedItems))
 				{
-					group.Remove(item);
-					if (group.Count == 0)
-						GroupedCollection?.Remove(group);
+					groupedItems = [];
+					itemsByKey.Add(key, groupedItems);
 				}
+
+				groupedItems.Add(item);
+			}
+
+			foreach (var (key, groupedItems) in itemsByKey)
+			{
+				var group = GroupedCollection.FirstOrDefault(x => x.Model.Key == key);
+				if (group is null)
+					continue;
+
+				var itemsToRemove = new HashSet<T>(groupedItems);
+				if (group.Count == itemsToRemove.Count && group.All(itemsToRemove.Contains))
+				{
+					GroupedCollection.Remove(group);
+					continue;
+				}
+
+				for (var index = group.Count - 1; index >= 0; index--)
+				{
+					if (!itemsToRemove.Contains(group[index]))
+						continue;
+
+					var rangeEnd = index;
+					while (index >= 0 && itemsToRemove.Contains(group[index]))
+						index--;
+
+					var rangeStart = index + 1;
+					var rangeCount = rangeEnd - rangeStart + 1;
+					if (rangeCount == 1)
+						group.RemoveAt(rangeStart);
+					else
+						group.RemoveRange(rangeStart, rangeCount);
+				}
+
+				if (group.Count == 0)
+					GroupedCollection.Remove(group);
 			}
 		}
 

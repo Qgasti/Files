@@ -2,17 +2,20 @@
 // Licensed under the MIT License.
 
 using System.IO;
+using Microsoft.Extensions.Logging;
 
 namespace Files.App.ViewModels
 {
 	public sealed partial class ShellViewModel
 	{
 		private const int MaxFolderNavigationSnapshots = 4;
-		private const int MaxItemsPerFolderNavigationSnapshot = 2_000;
-		private const int MaxTotalFolderNavigationSnapshotItems = 4_000;
+		private const int MaxDirectItemsPerFolderNavigationSnapshot = 2_000;
+		private const int MaxItemsPerFolderNavigationSnapshot = 10_000;
+		private const int MaxTotalFolderNavigationSnapshotItems = 12_000;
 		private static readonly TimeSpan FolderNavigationSnapshotLifetime = TimeSpan.FromMinutes(2);
 
 		private readonly Dictionary<string, FolderNavigationSnapshot> folderNavigationSnapshots = new(StringComparer.OrdinalIgnoreCase);
+		private readonly HashSet<string> activeSnapshotGitContextRefreshes = new(StringComparer.OrdinalIgnoreCase);
 		private readonly object folderNavigationSnapshotsLock = new();
 
 		private void CaptureFolderNavigationSnapshot(string? path)
@@ -21,16 +24,36 @@ namespace Files.App.ViewModels
 				return;
 
 			var snapshotKey = GetFolderNavigationSnapshotKey(path);
-			var items = FilesAndFolders.ToList();
-			if (items.Count > MaxItemsPerFolderNavigationSnapshot)
+			var currentItems = FilesAndFolders.ToList();
+			if (currentItems.Count > MaxItemsPerFolderNavigationSnapshot)
 			{
 				RemoveFolderNavigationSnapshot(snapshotKey);
 				return;
 			}
+			var usesLightweightItems = currentItems.Count > MaxDirectItemsPerFolderNavigationSnapshot;
+			var snapshotStartedTimestamp = usesLightweightItems ? Stopwatch.GetTimestamp() : 0;
+			var items = usesLightweightItems
+				? currentItems.Select(CreateLightweightNavigationSnapshotItem).ToList()
+				: currentItems;
+			if (usesLightweightItems)
+			{
+				App.Logger.LogInformation(
+					"Created a lightweight navigation snapshot with {ItemCount} items in {ElapsedMilliseconds:F1} ms.",
+					items.Count,
+					Stopwatch.GetElapsedTime(snapshotStartedTimestamp).TotalMilliseconds);
+			}
 
 			var now = DateTimeOffset.UtcNow;
 			var selectedPaths = GetSelectedItemPathsForSnapshot(path);
-			var snapshot = new FolderNavigationSnapshot(items, selectedPaths, CreateFolderNavigationSnapshotSignature(), now, now);
+			var snapshot = new FolderNavigationSnapshot(
+				items,
+				selectedPaths,
+				CreateFolderNavigationSnapshotSignature(),
+				GitDirectory,
+				GitHead,
+				IsValidGitDirectory,
+				now,
+				now);
 
 			lock (folderNavigationSnapshotsLock)
 			{
@@ -38,6 +61,73 @@ namespace Files.App.ViewModels
 				folderNavigationSnapshots[snapshotKey] = snapshot;
 				TrimFolderNavigationSnapshots(snapshotKey);
 			}
+		}
+
+		private bool TryGetFolderNavigationSnapshotGitContext(
+			string path,
+			out string? gitDirectory,
+			out BranchItem? gitHead,
+			out bool isValidGitDirectory)
+		{
+			gitDirectory = null;
+			gitHead = null;
+			isValidGitDirectory = false;
+
+			if (!IsFolderNavigationSnapshotEligible(path))
+				return false;
+
+			var snapshotKey = GetFolderNavigationSnapshotKey(path);
+			var now = DateTimeOffset.UtcNow;
+			lock (folderNavigationSnapshotsLock)
+			{
+				PruneExpiredFolderNavigationSnapshots(now);
+				if (!folderNavigationSnapshots.TryGetValue(snapshotKey, out var snapshot) ||
+					snapshot.Signature != CreateFolderNavigationSnapshotSignature())
+				{
+					return false;
+				}
+
+				gitDirectory = snapshot.GitDirectory;
+				gitHead = snapshot.GitHead;
+				isValidGitDirectory = snapshot.IsValidGitDirectory;
+				return true;
+			}
+		}
+
+		private void UpdateFolderNavigationSnapshotGitContext(
+			string path,
+			string? gitDirectory,
+			BranchItem? gitHead,
+			bool isValidGitDirectory)
+		{
+			if (!IsFolderNavigationSnapshotEligible(path))
+				return;
+
+			lock (folderNavigationSnapshotsLock)
+			{
+				var snapshotKey = GetFolderNavigationSnapshotKey(path);
+				if (folderNavigationSnapshots.TryGetValue(snapshotKey, out var snapshot))
+				{
+					folderNavigationSnapshots[snapshotKey] = snapshot with
+					{
+						GitDirectory = gitDirectory,
+						GitHead = gitHead,
+						IsValidGitDirectory = isValidGitDirectory
+					};
+				}
+			}
+		}
+
+		private bool TryStartFolderNavigationSnapshotGitContextRefresh(string path)
+		{
+			lock (folderNavigationSnapshotsLock)
+				return activeSnapshotGitContextRefreshes.Add(GetFolderNavigationSnapshotKey(path));
+		}
+
+		private void CompleteFolderNavigationSnapshotGitContextRefresh(string path)
+		{
+			lock (folderNavigationSnapshotsLock)
+				activeSnapshotGitContextRefreshes.Remove(GetFolderNavigationSnapshotKey(path));
 		}
 
 		private bool TryRestoreFolderNavigationSnapshot(string path, out IReadOnlyList<ListedItem> items, out IReadOnlySet<string> selectedPaths, out TimeSpan age)
@@ -119,6 +209,74 @@ namespace Files.App.ViewModels
 				snapshotItem.FileSizeBytes == currentItem.FileSizeBytes &&
 				snapshotItem.IsHiddenItem == currentItem.IsHiddenItem;
 
+		private static ListedItem CreateLightweightNavigationSnapshotItem(ListedItem item)
+		{
+			var snapshotItem = item switch
+			{
+				GitShortcutItem => new GitShortcutItem(),
+				GitItem => new GitItem(),
+				ShortcutItem => new ShortcutItem(item.FolderRelativeId),
+				ZipItem => new ZipItem(item.FolderRelativeId),
+				AlternateStreamItem => new AlternateStreamItem(),
+				_ when item.GetType() == typeof(ListedItem) => new ListedItem(item.FolderRelativeId),
+				_ => item
+			};
+
+			if (ReferenceEquals(snapshotItem, item))
+				return item;
+
+			snapshotItem.FolderRelativeId = item.FolderRelativeId;
+			snapshotItem.ContainsFilesOrFolders = item.ContainsFilesOrFolders;
+			snapshotItem.IsHiddenItem = item.IsHiddenItem;
+			snapshotItem.PrimaryItemAttribute = item.PrimaryItemAttribute;
+			snapshotItem.NeedsDelayedThumbnailLoad = item.NeedsDelayedThumbnailLoad;
+			snapshotItem.Opacity = item.Opacity;
+			snapshotItem.ItemPath = item.ItemPath;
+			snapshotItem.ItemNameRaw = item.ItemNameRaw;
+			snapshotItem.ItemType = item.ItemType;
+			snapshotItem.FileExtension = item.FileExtension;
+			snapshotItem.FileSize = item.FileSize;
+			snapshotItem.FileSizeBytes = item.FileSizeBytes;
+			snapshotItem.ItemDateModifiedReal = item.ItemDateModifiedReal;
+			snapshotItem.ItemDateCreatedReal = item.ItemDateCreatedReal;
+			snapshotItem.ItemDateAccessedReal = item.ItemDateAccessedReal;
+			snapshotItem.FileFRN = item.FileFRN;
+			snapshotItem.Key = item.Key;
+			snapshotItem.IsArchive = item.IsArchive;
+			snapshotItem.NeedsArchiveAssociationCheck = item.NeedsArchiveAssociationCheck;
+			snapshotItem.IsElevationRequired = item.IsElevationRequired;
+			snapshotItem.ItemPropertiesInitialized = false;
+			snapshotItem.ThumbnailPropertiesInitialized = false;
+			snapshotItem.LoadFileIcon = false;
+			snapshotItem.NeedsPlaceholderGlyph = true;
+
+			if (snapshotItem is IShortcutItem snapshotShortcut && item is IShortcutItem sourceShortcut)
+			{
+				snapshotShortcut.TargetPath = sourceShortcut.TargetPath;
+				snapshotShortcut.Arguments = sourceShortcut.Arguments;
+				snapshotShortcut.WorkingDirectory = sourceShortcut.WorkingDirectory;
+				snapshotShortcut.RunAsAdmin = sourceShortcut.RunAsAdmin;
+				snapshotShortcut.ShowWindowCommand = sourceShortcut.ShowWindowCommand;
+				snapshotShortcut.IsUrl = sourceShortcut.IsUrl;
+				snapshotShortcut.IsSymLink = sourceShortcut.IsSymLink;
+			}
+
+			if (snapshotItem is IGitItem snapshotGitItem && item is IGitItem sourceGitItem)
+			{
+				snapshotGitItem.StatusPropertiesInitialized = sourceGitItem.StatusPropertiesInitialized;
+				snapshotGitItem.CommitPropertiesInitialized = sourceGitItem.CommitPropertiesInitialized;
+				snapshotGitItem.UnmergedGitStatusIcon = sourceGitItem.UnmergedGitStatusIcon;
+				snapshotGitItem.UnmergedGitStatusName = sourceGitItem.UnmergedGitStatusName;
+				snapshotGitItem.GitLastCommitDate = sourceGitItem.GitLastCommitDate;
+				snapshotGitItem.GitLastCommitMessage = sourceGitItem.GitLastCommitMessage;
+				snapshotGitItem.GitLastCommitAuthor = sourceGitItem.GitLastCommitAuthor;
+				snapshotGitItem.GitLastCommitSha = sourceGitItem.GitLastCommitSha;
+				snapshotGitItem.GitLastCommitFullSha = sourceGitItem.GitLastCommitFullSha;
+			}
+
+			return snapshotItem;
+		}
+
 		private void RemoveFolderNavigationSnapshot(string? path)
 		{
 			if (string.IsNullOrEmpty(path))
@@ -199,6 +357,9 @@ namespace Files.App.ViewModels
 			IReadOnlyList<ListedItem> Items,
 			IReadOnlySet<string> SelectedPaths,
 			FolderNavigationSnapshotSignature Signature,
+			string? GitDirectory,
+			BranchItem? GitHead,
+			bool IsValidGitDirectory,
 			DateTimeOffset CapturedAt,
 			DateTimeOffset LastAccessed);
 

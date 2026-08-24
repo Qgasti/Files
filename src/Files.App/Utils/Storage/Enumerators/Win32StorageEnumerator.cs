@@ -19,7 +19,7 @@ namespace Files.App.Utils.Storage
 			long IntermediateUpdateWaitTicks);
 
 		private const int MaxConcurrentItemInitializations = 8;
-		private const int MaxIntermediateBatchSize = 128;
+		private const int MaxIntermediateBatchSize = 256;
 
 		private static readonly ISizeProvider folderSizeProvider = Ioc.Default.GetService<ISizeProvider>();
 		private static readonly IStorageCacheService fileListCache = Ioc.Default.GetRequiredService<IStorageCacheService>();

@@ -18,7 +18,8 @@ namespace Files.App.Utils.Storage
 		public bool RunAsAdmin { get; }
 		public SHOW_WINDOW_CMD ShowWindowCommand { get; set; }
 
-		public ShortcutStorageFolder(ShellLinkItem item) : base(item)
+		public ShortcutStorageFolder(ShellLinkItem item, IReadOnlyList<IStorageItem>? initialItems = null, uint initialItemRequestSize = 0)
+			: base(item, initialItems, initialItemRequestSize)
 		{
 			TargetPath = item.TargetPath;
 			Arguments = item.Arguments;
@@ -41,7 +42,8 @@ namespace Files.App.Utils.Storage
 		public string OriginalPath { get; }
 		public DateTimeOffset DateDeleted { get; }
 
-		public BinStorageFolder(ShellFileItem item) : base(item)
+		public BinStorageFolder(ShellFileItem item, IReadOnlyList<IStorageItem>? initialItems = null, uint initialItemRequestSize = 0)
+			: base(item, initialItems, initialItemRequestSize)
 		{
 			OriginalPath = item.FilePath;
 			DateDeleted = item.RecycleDate;
@@ -63,15 +65,21 @@ namespace Files.App.Utils.Storage
 		public override string FolderRelativeId => $"0\\{Name}";
 
 		public override DateTimeOffset DateCreated { get; }
+		internal BaseBasicProperties InitialBasicProperties { get; }
 		public override Windows.Storage.FileAttributes Attributes => Windows.Storage.FileAttributes.Directory;
 		public override IStorageItemExtraProperties Properties => new BaseBasicStorageItemExtraProperties(this);
+		private readonly IReadOnlyList<IStorageItem>? initialItems;
+		private readonly uint initialItemRequestSize;
 
-		public ShellStorageFolder(ShellFileItem item)
+		public ShellStorageFolder(ShellFileItem item, IReadOnlyList<IStorageItem>? initialItems = null, uint initialItemRequestSize = 0)
 		{
 			Name = item.FileName;
 			Path = item.RecyclePath; // True path on disk
 			DateCreated = item.CreatedDate;
 			DisplayType = item.FileType;
+			InitialBasicProperties = new ShellFolderBasicProperties(item);
+			this.initialItems = initialItems;
+			this.initialItemRequestSize = initialItemRequestSize;
 		}
 
 		public static bool IsShellPath(string path)
@@ -83,14 +91,17 @@ namespace Files.App.Utils.Storage
 		}
 
 		public static ShellStorageFolder FromShellItem(ShellFileItem item)
+			=> FromShellItem(item, null, 0);
+
+		private static ShellStorageFolder FromShellItem(ShellFileItem item, IReadOnlyList<IStorageItem>? initialItems, uint initialItemRequestSize)
 		{
 			if (item is ShellLinkItem linkItem)
-				return new ShortcutStorageFolder(linkItem);
+				return new ShortcutStorageFolder(linkItem, initialItems, initialItemRequestSize);
 
 			if (item.RecyclePath.Contains("$Recycle.Bin", StringComparison.OrdinalIgnoreCase))
-				return new BinStorageFolder(item);
+				return new BinStorageFolder(item, initialItems, initialItemRequestSize);
 
-			return new ShellStorageFolder(item);
+			return new ShellStorageFolder(item, initialItems, initialItemRequestSize);
 		}
 
 		public static IAsyncOperation<BaseStorageFolder> FromPathAsync(string path)
@@ -109,9 +120,30 @@ namespace Files.App.Utils.Storage
 			});
 		}
 
-		protected static async Task<(ShellFileItem Folder, List<ShellFileItem> Items)> GetFolderAndItems(string path, bool enumerate, int startIndex = 0, int maxItemsToRetrieve = int.MaxValue)
+		public static IAsyncOperation<BaseStorageFolder> FromPathWithInitialItemsAsync(string path, uint maxItemsToRetrieve)
 		{
-			return await Win32Helper.GetShellFolderAsync(path, !enumerate, enumerate, startIndex, maxItemsToRetrieve);
+			return AsyncInfo.Run<BaseStorageFolder>(async (cancellationToken) =>
+			{
+				if (!IsShellPath(path))
+					return null;
+
+				var res = await GetFolderAndItems(path, true, 0, (int)maxItemsToRetrieve, includeFolder: true);
+				if (res.Folder is null)
+					return null;
+
+				var items = ConvertShellItems(res.Items);
+				return FromShellItem(res.Folder, items, maxItemsToRetrieve);
+			});
+		}
+
+		protected static async Task<(ShellFileItem Folder, List<ShellFileItem> Items)> GetFolderAndItems(
+			string path,
+			bool enumerate,
+			int startIndex = 0,
+			int maxItemsToRetrieve = int.MaxValue,
+			bool includeFolder = false)
+		{
+			return await Win32Helper.GetShellFolderAsync(path, includeFolder || !enumerate, enumerate, startIndex, maxItemsToRetrieve);
 		}
 
 		public override IAsyncOperation<StorageFolder> ToStorageFolderAsync() => throw new NotSupportedException();
@@ -178,26 +210,27 @@ namespace Files.App.Utils.Storage
 		{
 			return AsyncInfo.Run<IReadOnlyList<IStorageItem>>(async (cancellationToken) =>
 			{
+				if (startIndex == 0 && initialItems is not null && maxItemsToRetrieve <= initialItemRequestSize)
+					return initialItems.Take((int)maxItemsToRetrieve).ToList();
+
 				var res = await GetFolderAndItems(Path, true, (int)startIndex, (int)maxItemsToRetrieve);
 				if (res.Items is null)
-				{
 					return null;
-				}
 
-				var items = new List<IStorageItem>();
-				foreach (var entry in res.Items)
-				{
-					if (entry.IsFolder)
-					{
-						items.Add(ShellStorageFolder.FromShellItem(entry));
-					}
-					else
-					{
-						items.Add(ShellStorageFile.FromShellItem(entry));
-					}
-				}
-				return items;
+				return ConvertShellItems(res.Items);
 			});
+		}
+
+		private static IReadOnlyList<IStorageItem> ConvertShellItems(IEnumerable<ShellFileItem>? entries)
+		{
+			if (entries is null)
+				return [];
+
+			return entries
+				.Select(entry => entry.IsFolder
+					? (IStorageItem)ShellStorageFolder.FromShellItem(entry)
+					: ShellStorageFile.FromShellItem(entry))
+				.ToList();
 		}
 
 		public override IAsyncOperation<BaseStorageFile> GetFileAsync(string name)

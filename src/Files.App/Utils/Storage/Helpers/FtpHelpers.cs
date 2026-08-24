@@ -7,11 +7,11 @@ namespace Files.App.Utils.Storage
 {
 	public static class FtpHelpers
 	{
-		public static async Task<bool> EnsureConnectedAsync(this AsyncFtpClient ftpClient)
+		public static async Task<bool> EnsureConnectedAsync(this AsyncFtpClient ftpClient, CancellationToken cancellationToken = default)
 		{
 			if (!ftpClient.IsConnected)
 			{
-				await ftpClient.Connect();
+				await ftpClient.Connect(cancellationToken);
 			}
 
 			return true;

@@ -8,6 +8,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.IO;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Storage;
 using Windows.Storage.FileProperties;
 
@@ -18,14 +19,14 @@ namespace Files.App.Utils.Storage
 		private const float FontSizeRatio = 0.35f;
 		private const string PreviewText = "Abg";
 
-		public static async Task<byte[]?> GetWinRTThumbnailAsync(string fontPath, uint size)
+		public static async Task<byte[]?> GetWinRTThumbnailAsync(string fontPath, uint size, CancellationToken cancellationToken = default)
 		{
 			StorageFile? file = null;
 			StorageItemThumbnail? thumbnail = null;
 			try
 			{
-				file = await StorageFile.GetFileFromPathAsync(fontPath);
-				thumbnail = await file.GetThumbnailAsync(ThumbnailMode.SingleItem, size);
+				file = await StorageFile.GetFileFromPathAsync(fontPath).AsTask(cancellationToken);
+				thumbnail = await file.GetThumbnailAsync(ThumbnailMode.SingleItem, size).AsTask(cancellationToken);
 
 				if (thumbnail is null || thumbnail.Size == 0)
 				{
@@ -35,10 +36,14 @@ namespace Files.App.Utils.Storage
 				using (var stream = thumbnail.AsStream())
 				{
 					using var memoryStream = new MemoryStream((int)thumbnail.Size);
-					await stream.CopyToAsync(memoryStream);
+					await stream.CopyToAsync(memoryStream, cancellationToken);
 
 					return memoryStream.ToArray();
 				}
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
 			}
 			catch (Exception ex)
 			{			

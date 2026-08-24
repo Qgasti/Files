@@ -13,7 +13,7 @@ namespace Files.App.Helpers
 {
 	internal static class BitmapHelper
 	{
-		public static async Task<BitmapImage?> ToBitmapAsync(this byte[]? data, int decodeSize = -1)
+		public static async Task<BitmapImage?> ToBitmapAsync(this byte[]? data, int decodeSize = -1, CancellationToken cancellationToken = default)
 		{
 			if (data is null)
 			{
@@ -30,8 +30,12 @@ namespace Files.App.Helpers
 					image.DecodePixelHeight = decodeSize;
 				}
 				image.DecodePixelType = DecodePixelType.Logical;
-				await image.SetSourceAsync(ms.AsRandomAccessStream());
+				await image.SetSourceAsync(ms.AsRandomAccessStream()).AsTask(cancellationToken);
 				return image;
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
 			}
 			catch (Exception)
 			{

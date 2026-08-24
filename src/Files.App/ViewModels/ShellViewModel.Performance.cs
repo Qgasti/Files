@@ -27,18 +27,32 @@ namespace Files.App.ViewModels
 			private int generatedThumbnailCount;
 			private int generatedThumbnailSuccessCount;
 			private int incrementalUpdateCount;
+			private int incrementalNotificationCount;
 			private int incrementalItemCount;
+			private long collectionSemaphoreWaitTicks;
+			private long collectionDispatcherWaitTicks;
 			private long incrementalUpdateElapsedTicks;
 			private long incrementalUpdateMaxElapsedTicks;
 			private int resetUpdateCount;
 			private long resetUpdateElapsedTicks;
 			private long resetUpdateMaxElapsedTicks;
+			private long finalOrderingElapsedTicks;
+			private int reusedDisplayedOrder;
+			private long finalProjectionElapsedTicks;
+			private long finalDiffPlanningElapsedTicks;
+			private int shellThumbnailStartedCount;
+			private int detachedShellWorkCount;
+			private int completedDetachedShellWorkCount;
+			private long detachedShellWorkElapsedTicks;
+			private long detachedShellWorkMaxElapsedTicks;
 
 			public long LoadId { get; }
 
 			public string CorrelationId { get; }
 
 			public string PathIdentifier { get; }
+
+			public bool HasPublishedFirstBatch => Volatile.Read(ref firstBatchTimestamp) != 0;
 
 			public FolderLoadPerformanceMetrics(long loadId, string path)
 			{
@@ -88,6 +102,23 @@ namespace Files.App.ViewModels
 					"Folder load {CorrelationId} Win32 breakdown for {ItemCount} items: initialization waits {InitializationMs:F1} ms, post-processing {PostProcessingMs:F1} ms, intermediate UI waits {IntermediateUpdateWaitMs:F1} ms, remaining enumeration {RemainingMs:F1} ms.",
 					CorrelationId,
 					timings.ItemCount,
+					TicksToMilliseconds(timings.ItemInitializationWaitTicks),
+					TicksToMilliseconds(timings.PostProcessingTicks),
+					TicksToMilliseconds(timings.IntermediateUpdateWaitTicks),
+					TicksToMilliseconds(remainingTicks));
+			}
+
+			public void RecordUniversalEnumeration(UniversalStorageEnumerator.PerformanceTimings timings)
+			{
+				var measuredTicks = timings.ProviderFetchWaitTicks + timings.ItemInitializationWaitTicks +
+					timings.PostProcessingTicks + timings.IntermediateUpdateWaitTicks;
+				var remainingTicks = Math.Max(0, timings.TotalElapsedTicks - measuredTicks);
+				App.Logger.LogInformation(
+					"Folder load {CorrelationId} StorageFolder breakdown for {ItemCount} items: provider fetch elapsed/blocking waits {ProviderFetchElapsedMs:F1}/{ProviderFetchWaitMs:F1} ms, initialization waits {InitializationMs:F1} ms, post-processing {PostProcessingMs:F1} ms, intermediate UI waits {IntermediateUpdateWaitMs:F1} ms, remaining enumeration {RemainingMs:F1} ms.",
+					CorrelationId,
+					timings.ItemCount,
+					TicksToMilliseconds(timings.ProviderFetchElapsedTicks),
+					TicksToMilliseconds(timings.ProviderFetchWaitTicks),
 					TicksToMilliseconds(timings.ItemInitializationWaitTicks),
 					TicksToMilliseconds(timings.PostProcessingTicks),
 					TicksToMilliseconds(timings.IntermediateUpdateWaitTicks),
@@ -170,12 +201,21 @@ namespace Files.App.ViewModels
 				}
 			}
 
-			public void RecordCollectionUpdate(bool incremental, int itemCount, long updateStartedTimestamp)
+			public void RecordCollectionUpdate(
+				bool incremental,
+				int itemCount,
+				int notificationCount,
+				long updateRequestedTimestamp,
+				long dispatcherEnqueuedTimestamp,
+				long updateStartedTimestamp)
 			{
 				var elapsedTicks = Stopwatch.GetTimestamp() - updateStartedTimestamp;
+				Interlocked.Add(ref collectionSemaphoreWaitTicks, Math.Max(0, dispatcherEnqueuedTimestamp - updateRequestedTimestamp));
+				Interlocked.Add(ref collectionDispatcherWaitTicks, Math.Max(0, updateStartedTimestamp - dispatcherEnqueuedTimestamp));
 				if (incremental)
 				{
 					Interlocked.Increment(ref incrementalUpdateCount);
+					Interlocked.Add(ref incrementalNotificationCount, notificationCount);
 					Interlocked.Add(ref incrementalItemCount, itemCount);
 					Interlocked.Add(ref incrementalUpdateElapsedTicks, elapsedTicks);
 					UpdateMaximum(ref incrementalUpdateMaxElapsedTicks, elapsedTicks);
@@ -188,6 +228,63 @@ namespace Files.App.ViewModels
 				}
 			}
 
+			public void RecordFinalOrdering(long orderingStartedTimestamp, bool reusedDisplayedOrder = false)
+			{
+				Interlocked.Add(ref finalOrderingElapsedTicks, Stopwatch.GetTimestamp() - orderingStartedTimestamp);
+				if (reusedDisplayedOrder)
+					Interlocked.Exchange(ref this.reusedDisplayedOrder, 1);
+			}
+
+			public void RecordFinalProjection(long projectionStartedTimestamp)
+			{
+				Interlocked.Add(ref finalProjectionElapsedTicks, Stopwatch.GetTimestamp() - projectionStartedTimestamp);
+			}
+
+			public void RecordFinalDiffPlanning(long elapsedTicks)
+			{
+				Interlocked.Add(ref finalDiffPlanningElapsedTicks, elapsedTicks);
+			}
+
+			public void RecordDetachedShellWork(Task shellWork)
+			{
+				var detachedTimestamp = Stopwatch.GetTimestamp();
+				var detachedCount = Interlocked.Increment(ref detachedShellWorkCount);
+				if (detachedCount == 1)
+				{
+					App.Logger.LogInformation(
+						"Folder load {CorrelationId} stopped waiting for its first canceled in-flight Shell thumbnail request; the STA work is finishing in the background.",
+						CorrelationId);
+				}
+
+				_ = shellWork.ContinueWith(
+					_ =>
+					{
+						var elapsedTicks = Stopwatch.GetTimestamp() - detachedTimestamp;
+						Interlocked.Add(ref detachedShellWorkElapsedTicks, elapsedTicks);
+						UpdateMaximum(ref detachedShellWorkMaxElapsedTicks, elapsedTicks);
+						if (Interlocked.Increment(ref completedDetachedShellWorkCount) == 1)
+						{
+							App.Logger.LogInformation(
+								"Folder load {CorrelationId} completed its first detached Shell thumbnail request {ElapsedMs:F1} ms after cancellation.",
+								CorrelationId,
+								TicksToMilliseconds(elapsedTicks));
+						}
+					},
+					CancellationToken.None,
+					TaskContinuationOptions.ExecuteSynchronously,
+					TaskScheduler.Default);
+			}
+
+			public void RecordShellThumbnailStarted()
+			{
+				if (Interlocked.Increment(ref shellThumbnailStartedCount) == 1)
+				{
+					App.Logger.LogInformation(
+						"Folder load {CorrelationId} started its first Shell thumbnail request.",
+						CorrelationId);
+				}
+			}
+
 			public void RecordCompleted(int itemCount, bool succeeded)
 			{
 				var firstBatch = Volatile.Read(ref firstBatchTimestamp);
@@ -195,16 +292,26 @@ namespace Files.App.ViewModels
 				var generatedCount = Volatile.Read(ref generatedThumbnailCount);
 				var incrementalCount = Volatile.Read(ref incrementalUpdateCount);
 				var resetCount = Volatile.Read(ref resetUpdateCount);
+				var shellStartedCount = Volatile.Read(ref shellThumbnailStartedCount);
+				var detachedCount = Volatile.Read(ref detachedShellWorkCount);
+				var detachedCompletedCount = Volatile.Read(ref completedDetachedShellWorkCount);
 
 				App.Logger.LogInformation(
-					"Folder load {CorrelationId} completed for {Path} in {ElapsedMs:F1} ms (success: {Succeeded}, items: {ItemCount}, first UI batch: {FirstBatchMs:F1} ms, incremental UI updates/affected items: {IncrementalUpdateCount}/{IncrementalItemCount}, avg/max: {IncrementalUpdateAverageMs:F1}/{IncrementalUpdateMaxMs:F1} ms, reset UI updates: {ResetUpdateCount}, avg/max: {ResetUpdateAverageMs:F1}/{ResetUpdateMaxMs:F1} ms, cached/icon thumbnails: {ThumbnailSuccessCount}/{ThumbnailCount} ({PersistentThumbnailHitCount} persistent), avg/max: {ThumbnailAverageMs:F1}/{ThumbnailMaxMs:F1} ms, generated thumbnails: {GeneratedSuccessCount}/{GeneratedCount}, avg/max: {GeneratedAverageMs:F1}/{GeneratedMaxMs:F1} ms).",
+					"Folder load {CorrelationId} completed for {Path} in {ElapsedMs:F1} ms (success: {Succeeded}, items: {ItemCount}, first UI batch: {FirstBatchMs:F1} ms, final ordering/projection/diff planning: {FinalOrderingMs:F1}/{FinalProjectionMs:F1}/{FinalDiffPlanningMs:F1} ms (display order reused: {ReusedDisplayedOrder}), collection semaphore/dispatcher waits: {CollectionSemaphoreWaitMs:F1}/{CollectionDispatcherWaitMs:F1} ms, incremental UI batches/notifications/affected items: {IncrementalUpdateCount}/{IncrementalNotificationCount}/{IncrementalItemCount}, avg/max: {IncrementalUpdateAverageMs:F1}/{IncrementalUpdateMaxMs:F1} ms, reset UI updates: {ResetUpdateCount}, avg/max: {ResetUpdateAverageMs:F1}/{ResetUpdateMaxMs:F1} ms, cached/icon thumbnails: {ThumbnailSuccessCount}/{ThumbnailCount} ({PersistentThumbnailHitCount} persistent), avg/max: {ThumbnailAverageMs:F1}/{ThumbnailMaxMs:F1} ms, generated thumbnails: {GeneratedSuccessCount}/{GeneratedCount}, avg/max: {GeneratedAverageMs:F1}/{GeneratedMaxMs:F1} ms, Shell thumbnail requests started: {ShellThumbnailStartedCount}, detached waits/completed: {DetachedShellWorkCount}/{CompletedDetachedShellWorkCount}, avg/max residual: {DetachedShellWorkAverageMs:F1}/{DetachedShellWorkMaxMs:F1} ms).",
 					CorrelationId,
 					PathIdentifier,
 					GetElapsedMilliseconds(startedTimestamp),
 					succeeded,
 					itemCount,
 					firstBatch == 0 ? -1d : GetElapsedMilliseconds(startedTimestamp, firstBatch),
+					TicksToMilliseconds(Volatile.Read(ref finalOrderingElapsedTicks)),
+					TicksToMilliseconds(Volatile.Read(ref finalProjectionElapsedTicks)),
+					TicksToMilliseconds(Volatile.Read(ref finalDiffPlanningElapsedTicks)),
+					Volatile.Read(ref reusedDisplayedOrder) != 0,
+					TicksToMilliseconds(Volatile.Read(ref collectionSemaphoreWaitTicks)),
+					TicksToMilliseconds(Volatile.Read(ref collectionDispatcherWaitTicks)),
 					incrementalCount,
+					Volatile.Read(ref incrementalNotificationCount),
 					Volatile.Read(ref incrementalItemCount),
 					GetAverageMilliseconds(Volatile.Read(ref incrementalUpdateElapsedTicks), incrementalCount),
 					TicksToMilliseconds(Volatile.Read(ref incrementalUpdateMaxElapsedTicks)),
@@ -219,7 +326,12 @@ namespace Files.App.ViewModels
 					Volatile.Read(ref generatedThumbnailSuccessCount),
 					generatedCount,
 					GetAverageMilliseconds(Volatile.Read(ref generatedThumbnailElapsedTicks), generatedCount),
-					TicksToMilliseconds(Volatile.Read(ref generatedThumbnailMaxElapsedTicks)));
+					TicksToMilliseconds(Volatile.Read(ref generatedThumbnailMaxElapsedTicks)),
+					shellStartedCount,
+					detachedCount,
+					detachedCompletedCount,
+					GetAverageMilliseconds(Volatile.Read(ref detachedShellWorkElapsedTicks), detachedCompletedCount),
+					TicksToMilliseconds(Volatile.Read(ref detachedShellWorkMaxElapsedTicks)));
 			}
 
 			private static string GetEnumeratorName(int result) => result switch

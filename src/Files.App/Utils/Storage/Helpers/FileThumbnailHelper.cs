@@ -12,8 +12,16 @@ namespace Files.App.Utils.Storage
 		/// <summary>
 		/// Returns icon or thumbnail for given file or folder
 		/// </summary>
-		public static async Task<byte[]?> GetIconAsync(string path, uint requestedSize, bool isFolder, IconOptions iconOptions)
+		public static async Task<byte[]?> GetIconAsync(
+			string path,
+			uint requestedSize,
+			bool isFolder,
+			IconOptions iconOptions,
+			CancellationToken cancellationToken = default,
+			Action<Task>? detachedShellWorkCallback = null)
 		{
+			cancellationToken.ThrowIfCancellationRequested();
+
 			var size = iconOptions.HasFlag(IconOptions.UseCurrentScale) ? requestedSize * App.AppModel.AppWindowDPI : requestedSize;
 			// Ensure size is at least 1 to prevent layout errors
 			size = Math.Max(1, size);
@@ -25,13 +33,17 @@ namespace Files.App.Utils.Storage
 				//Restrict to only %windir%\fonts
 				if (FileExtensionHelpers.IsFontFile(extension) && PathHelpers.IsInSystemFontsFolder(path))
 				{
-					var winrtThumbnail = await FontFileHelper.GetWinRTThumbnailAsync(path, (uint)size);
+					var winrtThumbnail = await FontFileHelper.GetWinRTThumbnailAsync(path, (uint)size, cancellationToken);
 					if (winrtThumbnail is not null)
 						return winrtThumbnail;
 
 					if (!extension.Equals(".fon", StringComparison.OrdinalIgnoreCase))
 					{
-						var fontThumbnail = await STATask.Run(() => FontFileHelper.GenerateFontThumbnail(path, (int)size), App.Logger);
+						var fontThumbnailTask = STATask.Run(
+							() => cancellationToken.IsCancellationRequested ? null : FontFileHelper.GenerateFontThumbnail(path, (int)size),
+							App.Logger);
+						var fontThumbnail = await WaitForStaResultAsync(fontThumbnailTask, cancellationToken, detachedShellWorkCallback);
+						cancellationToken.ThrowIfCancellationRequested();
 						if (fontThumbnail is not null)
 							return fontThumbnail;
 					}
@@ -42,7 +54,12 @@ namespace Files.App.Utils.Storage
 				? MtpHelpers.ResolveMtpShellPath(path) ?? path
 				: path;
 
-			return await STATask.Run(() => Win32Helper.GetIcon(resolvedPath, (int)size, isFolder, iconOptions), App.Logger);
+			var shellWork = STATask.Run(
+				() => cancellationToken.IsCancellationRequested ? null : Win32Helper.GetIcon(resolvedPath, (int)size, isFolder, iconOptions),
+				App.Logger);
+			var result = await WaitForStaResultAsync(shellWork, cancellationToken, detachedShellWorkCallback);
+			cancellationToken.ThrowIfCancellationRequested();
+			return result;
 		}
 
 		/// <summary>
@@ -51,8 +68,38 @@ namespace Files.App.Utils.Storage
 		/// <param name="path"></param>
 		/// <param name="isFolder"></param>
 		/// <returns></returns>
-		public static async Task<byte[]?> GetIconOverlayAsync(string path, bool isFolder)
-			=> await STATask.Run(() => Win32Helper.GetIconOverlay(path, isFolder), App.Logger);
+		public static async Task<byte[]?> GetIconOverlayAsync(
+			string path,
+			bool isFolder,
+			CancellationToken cancellationToken = default,
+			Action<Task>? detachedShellWorkCallback = null)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			var shellWork = STATask.Run(
+				() => cancellationToken.IsCancellationRequested ? null : Win32Helper.GetIconOverlay(path, isFolder),
+				App.Logger);
+			var result = await WaitForStaResultAsync(shellWork, cancellationToken, detachedShellWorkCallback);
+			cancellationToken.ThrowIfCancellationRequested();
+			return result;
+		}
+
+		private static async Task<T> WaitForStaResultAsync<T>(
+			Task<T> shellWork,
+			CancellationToken cancellationToken,
+			Action<Task>? detachedShellWorkCallback)
+		{
+			try
+			{
+				return await shellWork.WaitAsync(cancellationToken);
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				if (!shellWork.IsCompleted)
+					detachedShellWorkCallback?.Invoke(shellWork);
+
+				throw;
+			}
+		}
 
 		[Obsolete]
 		public static async Task<byte[]?> LoadIconFromPathAsync(string filePath, uint thumbnailSize, ThumbnailMode thumbnailMode, ThumbnailOptions thumbnailOptions, bool isFolder = false)

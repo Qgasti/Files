@@ -8,42 +8,75 @@ namespace Files.App.ViewModels
 	public sealed partial class ShellViewModel
 	{
 		private const int MaxDifferentialCollectionOperations = 64;
+		private const int MaxDifferentialCollectionAffectedItems = 1024;
 
-		private static int FindSortedInsertionIndex(IList<ListedItem> items, ListedItem item, IComparer<ListedItem> comparer)
+		private static List<SortedInsertionRange> CreateSortedInsertionRanges(
+			IReadOnlyList<ListedItem> currentItems,
+			IReadOnlyList<ListedItem> newItems,
+			IComparer<ListedItem> comparer)
 		{
-			var lowerBound = 0;
-			var upperBound = items.Count;
-			while (lowerBound < upperBound)
+			var ranges = new List<SortedInsertionRange>();
+			var currentIndex = 0;
+			var newIndex = 0;
+			var targetIndex = 0;
+
+			while (newIndex < newItems.Count)
 			{
-				var middle = lowerBound + ((upperBound - lowerBound) / 2);
-				if (comparer.Compare(items[middle], item) <= 0)
-					lowerBound = middle + 1;
-				else
-					upperBound = middle;
+				while (currentIndex < currentItems.Count && comparer.Compare(currentItems[currentIndex], newItems[newIndex]) <= 0)
+				{
+					currentIndex++;
+					targetIndex++;
+				}
+
+				var rangeIndex = targetIndex;
+				var rangeItems = new List<ListedItem>();
+				while (newIndex < newItems.Count &&
+					(currentIndex >= currentItems.Count || comparer.Compare(currentItems[currentIndex], newItems[newIndex]) > 0))
+				{
+					rangeItems.Add(newItems[newIndex]);
+					newIndex++;
+					targetIndex++;
+				}
+
+				if (rangeItems.Count > 0)
+					ranges.Add(new SortedInsertionRange(rangeIndex, rangeItems));
 			}
 
-			return lowerBound;
+			return ranges;
 		}
 
-		private bool TryApplyFlatCollectionDiff(IReadOnlyList<ListedItem> targetItems, out int operationCount)
+		private bool TryApplyFlatCollectionDiff(
+			IReadOnlyList<ListedItem> targetItems,
+			out int operationCount,
+			out int affectedItemCount,
+			out long planningElapsedTicks)
 		{
+			var planningStartedTimestamp = Stopwatch.GetTimestamp();
 			var currentItems = FilesAndFolders.ToList();
-			if (!TryCreateFlatCollectionDiff(currentItems, targetItems, out var operations))
+			if (!TryCreateFlatCollectionDiff(currentItems, targetItems, out var operations, out affectedItemCount))
 			{
-				operationCount = 0;
+				planningElapsedTicks = Stopwatch.GetTimestamp() - planningStartedTimestamp;
+				operationCount = operations.Count;
 				return false;
 			}
+			planningElapsedTicks = Stopwatch.GetTimestamp() - planningStartedTimestamp;
 
 			foreach (var operation in operations)
 			{
 				switch (operation.Kind)
 				{
-					case FlatCollectionOperationKind.Insert:
-						FilesAndFolders.Insert(operation.Index, operation.Item);
+					case FlatCollectionOperationKind.InsertRange:
+						if (operation.Items.Count == 1)
+							FilesAndFolders.Insert(operation.Index, operation.Items[0]);
+						else
+							FilesAndFolders.InsertRange(operation.Index, operation.Items);
 						break;
 
-					case FlatCollectionOperationKind.Remove:
-						FilesAndFolders.RemoveAt(operation.Index);
+					case FlatCollectionOperationKind.RemoveRange:
+						if (operation.Items.Count == 1)
+							FilesAndFolders.RemoveAt(operation.Index);
+						else
+							FilesAndFolders.RemoveRange(operation.Index, operation.Items.Count);
 						break;
 
 					case FlatCollectionOperationKind.Move:
@@ -153,9 +186,11 @@ namespace Files.App.ViewModels
 		private static bool TryCreateFlatCollectionDiff(
 			IReadOnlyList<ListedItem> currentItems,
 			IReadOnlyList<ListedItem> targetItems,
-			out List<FlatCollectionOperation> operations)
+			out List<FlatCollectionOperation> operations,
+			out int affectedItemCount)
 		{
 			operations = [];
+			affectedItemCount = 0;
 			var workingItems = currentItems.ToList();
 			var targetSet = new HashSet<ListedItem>(targetItems, ReferenceEqualityComparer.Instance);
 			if (currentItems.Count > 0 && targetItems.Count > 0 && !currentItems.Any(targetSet.Contains))
@@ -166,9 +201,16 @@ namespace Files.App.ViewModels
 				if (targetSet.Contains(workingItems[index]))
 					continue;
 
-				operations.Add(new(FlatCollectionOperationKind.Remove, index, -1, workingItems[index]));
-				workingItems.RemoveAt(index);
-				if (operations.Count > MaxDifferentialCollectionOperations)
+				var rangeEnd = index;
+				while (index >= 0 && !targetSet.Contains(workingItems[index]))
+					index--;
+
+				var rangeStart = index + 1;
+				var rangeItems = workingItems.GetRange(rangeStart, rangeEnd - rangeStart + 1);
+				operations.Add(new(FlatCollectionOperationKind.RemoveRange, rangeStart, -1, rangeItems));
+				workingItems.RemoveRange(rangeStart, rangeItems.Count);
+				affectedItemCount += rangeItems.Count;
+				if (operations.Count > MaxDifferentialCollectionOperations || affectedItemCount > MaxDifferentialCollectionAffectedItems)
 					return false;
 			}
 
@@ -183,17 +225,30 @@ namespace Files.App.ViewModels
 					: -1;
 				if (existingIndex >= 0)
 				{
-					operations.Add(new(FlatCollectionOperationKind.Move, targetIndex, existingIndex, targetItem));
+					operations.Add(new(FlatCollectionOperationKind.Move, targetIndex, existingIndex, [targetItem]));
 					workingItems.RemoveAt(existingIndex);
 					workingItems.Insert(targetIndex, targetItem);
+					affectedItemCount++;
 				}
 				else
 				{
-					operations.Add(new(FlatCollectionOperationKind.Insert, targetIndex, -1, targetItem));
-					workingItems.Insert(targetIndex, targetItem);
+					var rangeItems = new List<ListedItem>();
+					while (targetIndex + rangeItems.Count < targetItems.Count)
+					{
+						var candidate = targetItems[targetIndex + rangeItems.Count];
+						if (workingItems.FindIndex(targetIndex, item => ReferenceEquals(item, candidate)) >= 0)
+							break;
+
+						rangeItems.Add(candidate);
+					}
+
+					operations.Add(new(FlatCollectionOperationKind.InsertRange, targetIndex, -1, rangeItems));
+					workingItems.InsertRange(targetIndex, rangeItems);
+					affectedItemCount += rangeItems.Count;
+					targetIndex += rangeItems.Count - 1;
 				}
 
-				if (operations.Count > MaxDifferentialCollectionOperations)
+				if (operations.Count > MaxDifferentialCollectionOperations || affectedItemCount > MaxDifferentialCollectionAffectedItems)
 					return false;
 			}
 
@@ -202,8 +257,8 @@ namespace Files.App.ViewModels
 
 		private enum FlatCollectionOperationKind
 		{
-			Insert,
-			Remove,
+			InsertRange,
+			RemoveRange,
 			Move
 		}
 
@@ -211,6 +266,10 @@ namespace Files.App.ViewModels
 			FlatCollectionOperationKind Kind,
 			int Index,
 			int OldIndex,
-			ListedItem Item);
+			IReadOnlyList<ListedItem> Items);
+
+		private readonly record struct SortedInsertionRange(
+			int Index,
+			IReadOnlyList<ListedItem> Items);
 	}
 }
