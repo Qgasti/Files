@@ -10,6 +10,67 @@ namespace Files.App.ViewModels
 		private const int MaxDifferentialCollectionOperations = 64;
 		private const int MaxDifferentialCollectionAffectedItems = 1024;
 
+		private sealed class ProgressiveCollectionUpdateCoalescer(
+			ShellViewModel owner,
+			FolderLoadPerformanceMetrics? loadMetrics,
+			CancellationToken cancellationToken)
+		{
+			private readonly object syncRoot = new();
+			private List<ListedItem> pendingItems = [];
+			private Task processingTask = Task.CompletedTask;
+			private bool isProcessing;
+
+			public void Enqueue(IReadOnlyList<ListedItem> items)
+			{
+				if (items.Count == 0 || cancellationToken.IsCancellationRequested)
+					return;
+
+				lock (syncRoot)
+				{
+					pendingItems.AddRange(items);
+					if (isProcessing)
+						return;
+
+					isProcessing = true;
+					processingTask = ProcessAsync();
+				}
+			}
+
+			public Task FlushAsync()
+			{
+				lock (syncRoot)
+					return processingTask;
+			}
+
+			private async Task ProcessAsync()
+			{
+				while (true)
+				{
+					List<ListedItem> items;
+					lock (syncRoot)
+					{
+						if (cancellationToken.IsCancellationRequested)
+						{
+							pendingItems.Clear();
+							isProcessing = false;
+							return;
+						}
+
+						if (pendingItems.Count == 0)
+						{
+							isProcessing = false;
+							return;
+						}
+
+						items = pendingItems;
+						pendingItems = [];
+					}
+
+					await owner.AppendFilesAndFoldersAsync(items, loadMetrics, cancellationToken);
+				}
+			}
+		}
+
 		private static List<SortedInsertionRange> CreateSortedInsertionRanges(
 			IReadOnlyList<ListedItem> currentItems,
 			IReadOnlyList<ListedItem> newItems,

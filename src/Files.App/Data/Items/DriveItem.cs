@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Files.App.Controls;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -14,9 +15,12 @@ namespace Files.App.Data.Items
 {
 	public sealed partial class DriveItem : ExpandableSidebarItemBase, INavigationControlItem, IFolder, IExpandableSidebarFolder
 	{
+		private static readonly TimeSpan DrivePropertiesQueryTimeout = TimeSpan.FromSeconds(5);
+
 		private readonly SemaphoreSlim thumbnailLoadSemaphore = new(1, 1);
 		private readonly object updatePropertiesLock = new();
 		private Task? updatePropertiesTask;
+		private DrivePropertiesQuery? drivePropertiesQuery;
 
 		private BitmapImage icon;
 		public BitmapImage Icon
@@ -296,17 +300,41 @@ namespace Files.App.Data.Items
 		{
 			try
 			{
+				var query = GetOrCreateDrivePropertiesQuery();
+				if (Volatile.Read(ref query.TimeoutLogged) != 0 && !query.Task.IsCompleted)
+					return;
+
 				DrivePropertiesResult result;
 				try
 				{
-					var root = Root;
-					var path = Path;
-					var type = Type;
-					result = await Task.Run(() => QueryDrivePropertiesAsync(root, path, type));
+					result = await query.Task.WaitAsync(DrivePropertiesQueryTimeout);
+				}
+				catch (TimeoutException)
+				{
+					if (Interlocked.Exchange(ref query.TimeoutLogged, 1) == 0)
+					{
+						App.Logger.LogWarning(
+							"Drive property query for {Path} exceeded {TimeoutSeconds} seconds; retaining existing values while the coalesced provider request continues.",
+							LogPathHelper.GetPathIdentifier(query.Path),
+							DrivePropertiesQueryTimeout.TotalSeconds);
+					}
+
+					return;
 				}
 				catch
 				{
 					result = DrivePropertiesResult.Unknown;
+				}
+				finally
+				{
+					if (query.Task.IsCompleted)
+					{
+						lock (updatePropertiesLock)
+						{
+							if (ReferenceEquals(drivePropertiesQuery, query))
+								drivePropertiesQuery = null;
+						}
+					}
 				}
 
 				await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() => ApplyDriveProperties(result));
@@ -315,6 +343,31 @@ namespace Files.App.Data.Items
 			{
 				lock (updatePropertiesLock)
 					updatePropertiesTask = null;
+			}
+		}
+
+		private DrivePropertiesQuery GetOrCreateDrivePropertiesQuery()
+		{
+			lock (updatePropertiesLock)
+			{
+				var root = Root;
+				var path = Path;
+				var type = Type;
+				if (drivePropertiesQuery is not null &&
+					ReferenceEquals(drivePropertiesQuery.Root, root) &&
+					string.Equals(drivePropertiesQuery.Path, path, StringComparison.OrdinalIgnoreCase) &&
+					drivePropertiesQuery.Type == type)
+				{
+					return drivePropertiesQuery;
+				}
+
+				var queryTask = Task.Run(() => QueryDrivePropertiesAsync(root, path, type));
+				_ = queryTask.ContinueWith(
+					static task => _ = task.Exception,
+					CancellationToken.None,
+					TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+					TaskScheduler.Default);
+				return drivePropertiesQuery = new(queryTask, root, path, type);
 			}
 		}
 
@@ -398,6 +451,15 @@ namespace Files.App.Data.Items
 				string.Empty,
 				false,
 				false);
+		}
+
+		private sealed record DrivePropertiesQuery(
+			Task<DrivePropertiesResult> Task,
+			StorageFolder Root,
+			string Path,
+			DriveType Type)
+		{
+			public int TimeoutLogged;
 		}
 
 		public async IAsyncEnumerable<IStorableChild> GetItemsAsync(StorableType storableType = StorableType.All, [EnumeratorCancellation] CancellationToken cancellationToken = default)

@@ -2831,6 +2831,10 @@ namespace Files.App.ViewModels
 				}
 				else
 				{
+					var progressiveUpdates = suppressIntermediateUpdates
+						? null
+						: new ProgressiveCollectionUpdateCoalescer(this, loadMetrics, cancellationToken);
+					var hasPublishedFirstBatch = false;
 					await Task.Run(async () =>
 					{
 						List<ListedItem> fileList = await Win32StorageEnumerator.ListEntries(
@@ -2844,9 +2848,22 @@ namespace Files.App.ViewModels
 							{
 								filesAndFolders.AddRange(intermediateList);
 								if (!suppressIntermediateUpdates)
-									await AppendFilesAndFoldersAsync(intermediateList, loadMetrics, cancellationToken);
+								{
+									if (!hasPublishedFirstBatch)
+									{
+										await AppendFilesAndFoldersAsync(intermediateList, loadMetrics, cancellationToken);
+										hasPublishedFirstBatch = true;
+									}
+									else
+									{
+										progressiveUpdates!.Enqueue(intermediateList);
+									}
+								}
 							},
 							performanceCallback: loadMetrics is null ? null : loadMetrics.RecordWin32Enumeration);
+
+						if (progressiveUpdates is not null)
+							await progressiveUpdates.FlushAsync();
 
 						filesAndFolders.AddRange(fileList);
 						if (!suppressIntermediateUpdates && folderSettings.DirectoryGroupOption == GroupOption.None)
@@ -2906,6 +2923,10 @@ namespace Files.App.ViewModels
 
 			try
 			{
+				var progressiveUpdates = suppressIntermediateUpdates
+					? null
+					: new ProgressiveCollectionUpdateCoalescer(this, loadMetrics, cancellationToken);
+				var hasPublishedFirstBatch = false;
 				await Task.Run(async () =>
 				{
 					List<ListedItem> finalList = await UniversalStorageEnumerator.ListEntries(
@@ -2920,9 +2941,22 @@ namespace Files.App.ViewModels
 							// Sorting the growing list on every intermediate batch is O(batches x n log n);
 							// append unsorted here (matching the Win32 path) and sort once when enumeration completes.
 							if (!suppressIntermediateUpdates)
-								await AppendFilesAndFoldersAsync(intermediateList, loadMetrics, cancellationToken);
+							{
+								if (!hasPublishedFirstBatch)
+								{
+									await AppendFilesAndFoldersAsync(intermediateList, loadMetrics, cancellationToken);
+									hasPublishedFirstBatch = true;
+								}
+								else
+								{
+									progressiveUpdates!.Enqueue(intermediateList);
+								}
+							}
 						},
 						performanceCallback: loadMetrics is null ? null : loadMetrics.RecordUniversalEnumeration);
+
+					if (progressiveUpdates is not null)
+						await progressiveUpdates.FlushAsync();
 
 					filesAndFolders.AddRange(finalList);
 					if (!suppressIntermediateUpdates && folderSettings.DirectoryGroupOption == GroupOption.None)

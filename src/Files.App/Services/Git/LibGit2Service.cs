@@ -2,6 +2,7 @@ using LibGit2Sharp;
 using Microsoft.Extensions.Logging;
 using Sentry;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -69,16 +70,20 @@ internal sealed partial class LibGit2Service // : IVersionControl
 
 		try
 		{
-			if (IsRepoValid(path))
-				return path;
-			else
+			var candidate = path;
+			while (!candidate.Equals(root, StringComparison.OrdinalIgnoreCase))
 			{
-				var parentDir = PathNormalization.GetParentDir(path);
-				if (parentDir == path)
-					return null;
-				else
-					return GetGitRepositoryPath(parentDir, root);
+				if (HasRepositoryMarker(candidate))
+					return candidate;
+
+				var parentDir = PathNormalization.GetParentDir(candidate);
+				if (parentDir == candidate)
+					break;
+
+				candidate = parentDir;
 			}
+
+			return null;
 		}
 		catch (Exception ex) when (ex is LibGit2SharpException or EncoderFallbackException)
 		{
@@ -146,9 +151,6 @@ internal sealed partial class LibGit2Service // : IVersionControl
 		var (_, returnValue) = await DoGitOperationAsync<(GitOperationResult, BranchItem?)>(() =>
 		{
 			BranchItem? head = null;
-			if (!IsRepoValid(path))
-				return (GitOperationResult.GenericError, head);
-
 			try
 			{
 				using var repository = new Repository(path);
@@ -507,6 +509,14 @@ internal sealed partial class LibGit2Service // : IVersionControl
 	private static bool IsRepoValid(string path)
 	{
 		return SafetyExtensions.IgnoreExceptions(() => Repository.IsValid(path));
+	}
+
+	private static bool HasRepositoryMarker(string path)
+	{
+		var gitMarkerPath = Path.Combine(path, ".git");
+		return Directory.Exists(gitMarkerPath) ||
+			File.Exists(gitMarkerPath) ||
+			File.Exists(Path.Combine(path, "HEAD")) && Directory.Exists(Path.Combine(path, "objects"));
 	}
 
 	private static IEnumerable<Branch> GetValidBranches(BranchCollection branches)
