@@ -15,7 +15,7 @@ namespace Files.App.ViewModels
 		private static readonly TimeSpan FolderNavigationSnapshotLifetime = TimeSpan.FromMinutes(2);
 
 		private readonly Dictionary<string, FolderNavigationSnapshot> folderNavigationSnapshots = new(StringComparer.OrdinalIgnoreCase);
-		private readonly HashSet<string> activeSnapshotGitContextRefreshes = new(StringComparer.OrdinalIgnoreCase);
+		private readonly HashSet<string> activeGitContextRefreshes = new(StringComparer.OrdinalIgnoreCase);
 		private readonly object folderNavigationSnapshotsLock = new();
 
 		private void CaptureFolderNavigationSnapshot(string? path)
@@ -118,16 +118,16 @@ namespace Files.App.ViewModels
 			}
 		}
 
-		private bool TryStartFolderNavigationSnapshotGitContextRefresh(string path)
+		private bool TryStartGitContextRefresh(string path)
 		{
 			lock (folderNavigationSnapshotsLock)
-				return activeSnapshotGitContextRefreshes.Add(GetFolderNavigationSnapshotKey(path));
+				return activeGitContextRefreshes.Add(GetFolderNavigationSnapshotKey(path));
 		}
 
-		private void CompleteFolderNavigationSnapshotGitContextRefresh(string path)
+		private void CompleteGitContextRefresh(string path)
 		{
 			lock (folderNavigationSnapshotsLock)
-				activeSnapshotGitContextRefreshes.Remove(GetFolderNavigationSnapshotKey(path));
+				activeGitContextRefreshes.Remove(GetFolderNavigationSnapshotKey(path));
 		}
 
 		private bool TryRestoreFolderNavigationSnapshot(string path, out IReadOnlyList<ListedItem> items, out IReadOnlySet<string> selectedPaths, out TimeSpan age)

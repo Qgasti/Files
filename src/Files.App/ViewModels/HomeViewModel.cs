@@ -190,11 +190,8 @@ namespace Files.App.ViewModels
 
 		public async Task RefreshWidgetProperties()
 		{
-			await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(async () =>
-			{
-				foreach (var viewModel in WidgetItems.Select(x => x.WidgetItemModel).ToList())
-					await viewModel.RefreshWidgetAsync();
-			});
+			var viewModels = WidgetItems.Select(x => x.WidgetItemModel).ToList();
+			await Task.WhenAll(viewModels.Select(viewModel => viewModel.RefreshWidgetAsync()));
 		}
 
 		private bool InsertWidget(WidgetContainerItem widgetModel, int atIndex)
@@ -211,49 +208,53 @@ namespace Files.App.ViewModels
 				return false;
 			}
 
-			if (atIndex > WidgetItems.Count)
+			void Insert()
 			{
-				MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
-				{
+				if (atIndex > WidgetItems.Count)
 					WidgetItems.Add(widgetModel);
-				});
-			}
-			else
-			{
-				MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
-				{
+				else
 					WidgetItems.Insert(atIndex, widgetModel);
-				});
 			}
+
+			if (MainWindow.Instance.DispatcherQueue.HasThreadAccess)
+				Insert();
+			else
+				_ = MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(Insert);
 
 			return true;
 		}
 
 		public bool CanAddWidget(string widgetName)
 		{
+			if (MainWindow.Instance.DispatcherQueue.HasThreadAccess)
+				return !WidgetItems.Any(item => item.WidgetItemModel.WidgetName == widgetName);
+
 			return MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
 			{
-				return !(WidgetItems.Any((item) => item.WidgetItemModel.WidgetName == widgetName));
+				return !WidgetItems.Any(item => item.WidgetItemModel.WidgetName == widgetName);
 			}).GetAwaiter().GetResult();
 		}
 
 		private void RemoveWidgetAt(int index)
 		{
 			if (index < 0)
-			{
 				return;
-			}
 
-			MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
+			void Remove()
 			{
 				WidgetItems[index].Dispose();
 				WidgetItems.RemoveAt(index);
-			});
+			}
+
+			if (MainWindow.Instance.DispatcherQueue.HasThreadAccess)
+				Remove();
+			else
+				_ = MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(Remove);
 		}
 
 		public void RemoveWidget<TWidget>() where TWidget : IWidgetViewModel
 		{
-			MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
+			void Remove()
 			{
 				int indexToRemove = -1;
 
@@ -272,7 +273,12 @@ namespace Files.App.ViewModels
 					WidgetItems[indexToRemove].Dispose();
 					WidgetItems.RemoveAt(indexToRemove);
 				}
-			});
+			}
+
+			if (MainWindow.Instance.DispatcherQueue.HasThreadAccess)
+				Remove();
+			else
+				_ = MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(Remove);
 		}
 
 		// Command methods
@@ -289,13 +295,18 @@ namespace Files.App.ViewModels
 		{
 			UserSettingsService.GeneralSettingsService.PropertyChanged -= GeneralSettingsService_PropertyChanged;
 
-			MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
+			void DisposeWidgets()
 			{
 				for (int i = 0; i < WidgetItems.Count; i++)
 					WidgetItems[i].Dispose();
 
 				WidgetItems.Clear();
-			});
+			}
+
+			if (MainWindow.Instance.DispatcherQueue.HasThreadAccess)
+				DisposeWidgets();
+			else
+				_ = MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(DisposeWidgets);
 		}
 	}
 }

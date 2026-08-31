@@ -40,6 +40,7 @@ namespace Files.App.Views
 
 		private DispatcherQueueTimer _updateDateDisplayTimer;
 		private WindowMessageMonitor? _titleBarMessageMonitor;
+		private bool _windowEventsRegistered;
 
 		private readonly Dictionary<TabBarItem, double> _sidebarScrollByTab = new();
 		private TabBarItem? _previousSidebarTab;
@@ -141,6 +142,32 @@ namespace Files.App.Views
 
 			_titleBarMessageMonitor = new WindowMessageMonitor(titleBarHwnd);
 			_titleBarMessageMonitor.WindowMessageReceived += TitleBar_WindowMessageReceived;
+		}
+
+		private void DetachTitleBarMessageMonitor()
+		{
+			if (_titleBarMessageMonitor is null)
+				return;
+
+			_titleBarMessageMonitor.WindowMessageReceived -= TitleBar_WindowMessageReceived;
+			_titleBarMessageMonitor.Dispose();
+			_titleBarMessageMonitor = null;
+		}
+
+		private void MainWindow_InteractiveMoveStarted(object? sender, EventArgs e)
+		{
+			DetachTitleBarMessageMonitor();
+		}
+
+		private void MainWindow_InteractiveMoveCompleted(object? sender, EventArgs e)
+		{
+			AttachTitleBarMessageMonitor();
+		}
+
+		private void MainWindow_AppWindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
+		{
+			if (args.DidSizeChange || args.DidPresenterChange)
+				MainWindow.Instance.RaiseSetTitleBarDragRegion(SetTitleBarDragRegion);
 		}
 
 		private void TitleBar_WindowMessageReceived(object? sender, WindowMessageEventArgs e)
@@ -311,7 +338,13 @@ namespace Files.App.Views
 
 		private void Page_Loaded(object sender, RoutedEventArgs e)
 		{
-			MainWindow.Instance.AppWindow.Changed += (_, _) => MainWindow.Instance.RaiseSetTitleBarDragRegion(SetTitleBarDragRegion);
+			if (!_windowEventsRegistered)
+			{
+				MainWindow.Instance.AppWindow.Changed += MainWindow_AppWindowChanged;
+				MainWindow.Instance.InteractiveMoveStarted += MainWindow_InteractiveMoveStarted;
+				MainWindow.Instance.InteractiveMoveCompleted += MainWindow_InteractiveMoveCompleted;
+				_windowEventsRegistered = true;
+			}
 
 			// Defers loading until after the page has loaded to improve startup perf
 			FindName(nameof(InnerNavigationToolbar));

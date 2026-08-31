@@ -86,6 +86,7 @@ namespace Files.App
 				// Configure the DI (dependency injection) container
 				var host = AppLifecycleHelper.ConfigureHost();
 				Ioc.Default.ConfigureServices(host.Services);
+				MainWindow.Instance.ApplyTitleBarPreference();
 
 				// Configure Sentry
 				if (AppLifecycleHelper.AppEnvironment is not AppEnvironment.Dev)

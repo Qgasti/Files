@@ -3,6 +3,7 @@
 
 using System.IO;
 using System.Windows.Input;
+using Windows.System;
 
 namespace Files.App.ViewModels.Settings
 {
@@ -10,7 +11,9 @@ namespace Files.App.ViewModels.Settings
 	{
 		private readonly IFileTagsSettingsService FileTagsSettingsService = Ioc.Default.GetRequiredService<IFileTagsSettingsService>();
 		private readonly IDevToolsSettingsService DevToolsSettingsService = Ioc.Default.GetRequiredService<IDevToolsSettingsService>();
+		private readonly IUserSettingsService UserSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
 		private readonly ICommonDialogService CommonDialogService = Ioc.Default.GetRequiredService<ICommonDialogService>();
+		private bool isRestartPromptOpen;
 
 		public Dictionary<OpenInIDEOption, string> OpenInIDEOptions { get; private set; } = [];
 		public ICommand RemoveCredentialsCommand { get; }
@@ -38,6 +41,20 @@ namespace Files.App.ViewModels.Settings
 
 		public bool CanSaveIDEChanges =>
 			IsIDENameValid && IsIDEPathValid;
+
+		private bool useNativeTitleBar;
+		public bool UseNativeTitleBar
+		{
+			get => useNativeTitleBar;
+			set
+			{
+				if (SetProperty(ref useNativeTitleBar, value))
+				{
+					DevToolsSettingsService.UseNativeTitleBar = value;
+					_ = PromptForRestartAsync();
+				}
+			}
+		}
 
 		private bool _IsIDEPathValid;
 		public bool IsIDEPathValid
@@ -95,6 +112,7 @@ namespace Files.App.ViewModels.Settings
 
 			IDEPath = DevToolsSettingsService.IDEPath;
 			IDEName = DevToolsSettingsService.IDEName;
+			useNativeTitleBar = DevToolsSettingsService.UseNativeTitleBar;
 			IsIDEPathValid = true;
 			IsIDENameValid = true;
 
@@ -107,6 +125,34 @@ namespace Files.App.ViewModels.Settings
 			StartEditingIDECommand = new RelayCommand(DoStartEditingIDE);
 			OpenFilePickerForIDECommand = new RelayCommand(DoOpenFilePickerForIDE);
 			TestIDECommand = new RelayCommand(DoTestIDE);
+		}
+
+		private async Task PromptForRestartAsync()
+		{
+			if (isRestartPromptOpen)
+				return;
+
+			isRestartPromptOpen = true;
+			try
+			{
+				var restartNow = await DialogDisplayHelper.ShowDialogAsync(
+					Strings.Restart.GetLocalizedResource(),
+					Strings.NativeTitleBarRestartDescription.GetLocalizedResource(),
+					Strings.Restart.GetLocalizedResource(),
+					Strings.No.GetLocalizedResource());
+
+				if (!restartNow)
+					return;
+
+				UserSettingsService.AppSettingsService.RestoreTabsOnStartup = true;
+				AppLifecycleHelper.SaveSessionTabs();
+				await Launcher.LaunchUriAsync(new Uri("files-dev:"));
+				Process.GetCurrentProcess().Kill();
+			}
+			finally
+			{
+				isRestartPromptOpen = false;
+			}
 		}
 
 		private string selectedOpenInIDEOption;

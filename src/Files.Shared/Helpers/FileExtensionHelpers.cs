@@ -14,6 +14,21 @@ namespace Files.Shared.Helpers
 	/// </summary>
 	public static class FileExtensionHelpers
 	{
+		private static readonly FrozenSet<string> _imageTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+		{
+			".png", ".bmp", ".jpg", ".jpeg", ".jfif", ".gif", ".tiff", ".tif", ".webp", ".jxr"
+		}.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+		private static readonly FrozenSet<string> _audioTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+		{
+			".mp3", ".m4a", ".ogg", ".oga", ".wav", ".wma", ".aac", ".adt", ".adts", ".cda", ".flac"
+		}.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+		private static readonly FrozenSet<string> _videoTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+		{
+			".avi", ".mp4", ".webm", ".ogg", ".mov", ".qt", ".m4v", ".mp4v", ".3g2", ".3gp2", ".3gp", ".3gpp", ".mkv"
+		}.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
 		private static readonly FrozenSet<string> _signableTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
 		{
 			".aab", ".apk", ".application", ".appx", ".appxbundle", ".arx", ".cab", ".cat", ".cbx",
@@ -57,7 +72,7 @@ namespace Files.Shared.Helpers
 		/// <returns><c>true</c> if the fileExtensionToCheck is an image; otherwise, <c>false</c>.</returns>
 		public static bool IsImageFile(string? fileExtensionToCheck)
 		{
-			return HasExtension(fileExtensionToCheck, ".png", ".bmp", ".jpg", ".jpeg", ".jfif", ".gif", ".tiff", ".tif", ".webp", ".jxr");
+			return fileExtensionToCheck is not null && _imageTypes.Contains(fileExtensionToCheck);
 		}
 
 		/// <summary>
@@ -87,7 +102,7 @@ namespace Files.Shared.Helpers
 		/// <returns><c>true</c> if the fileExtensionToCheck is an audio file; otherwise, <c>false</c>.</returns>
 		public static bool IsAudioFile(string? fileExtensionToCheck)
 		{
-			return HasExtension(fileExtensionToCheck, ".mp3", ".m4a", ".ogg", ".oga", ".wav", ".wma", ".aac", ".adt", ".adts", ".cda", ".flac");
+			return fileExtensionToCheck is not null && _audioTypes.Contains(fileExtensionToCheck);
 		}
 
 		/// <summary>
@@ -97,7 +112,7 @@ namespace Files.Shared.Helpers
 		/// <returns><c>true</c> if the fileExtensionToCheck is a video file; otherwise, <c>false</c>.</returns>
 		public static bool IsVideoFile(string? fileExtensionToCheck)
 		{
-			return HasExtension(fileExtensionToCheck, ".avi", ".mp4", ".webm", ".ogg", ".mov", ".qt", ".m4v", ".mp4v", ".3g2", ".3gp2", ".3gp", ".3gpp", ".mkv");
+			return fileExtensionToCheck is not null && _videoTypes.Contains(fileExtensionToCheck);
 		}
 
 		/// <summary>

@@ -1,4 +1,4 @@
-﻿// Copyright (c) Files Community
+// Copyright (c) Files Community
 // Licensed under the MIT License.
 
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -23,10 +23,11 @@ namespace Files.App.Data.Items
 
 		private BitmapImage? _Thumbnail;
 		public BitmapImage? Thumbnail { get => _Thumbnail; set => SetProperty(ref _Thumbnail, value); }
+		private byte[]? pendingThumbnailData;
 
 		// Constructor
 
-		public WidgetFolderCardItem(IWindowsStorable item, string text, bool isPinned, string tooltip)
+		public WidgetFolderCardItem(IWindowsStorable item, string text, bool isPinned, string tooltip, byte[]? thumbnailData = null)
 		{
 			AutomationProperties = text;
 			Item = item;
@@ -34,6 +35,7 @@ namespace Files.App.Data.Items
 			IsPinned = isPinned;
 			Path = item.GetDisplayName(SIGDN.SIGDN_DESKTOPABSOLUTEPARSING);
 			Tooltip = tooltip;
+			pendingThumbnailData = thumbnailData;
 		}
 
 		// Methods
@@ -43,10 +45,17 @@ namespace Files.App.Data.Items
 			if (string.IsNullOrEmpty(Path))
 				return;
 
+			var rawThumbnailData = Interlocked.Exchange(ref pendingThumbnailData, null);
+			if (rawThumbnailData is not null)
+			{
+				Thumbnail = await rawThumbnailData.ToBitmapAsync();
+				return;
+			}
+
 			var thumbnailSize = (int)(Constants.ShellIconSizes.Large * App.AppModel.AppWindowDPI);
 			// Ensure thumbnail size is at least 1 to prevent layout errors
 			thumbnailSize = Math.Max(1, thumbnailSize);
-			Item.TryGetThumbnail(thumbnailSize, SIIGBF.SIIGBF_ICONONLY, out var rawThumbnailData);
+			Item.TryGetThumbnail(thumbnailSize, SIIGBF.SIIGBF_ICONONLY, out rawThumbnailData);
 			if (rawThumbnailData is null)
 				return;
 

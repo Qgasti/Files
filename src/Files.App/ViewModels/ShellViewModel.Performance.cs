@@ -245,6 +245,28 @@ namespace Files.App.ViewModels
 				Interlocked.Add(ref finalDiffPlanningElapsedTicks, elapsedTicks);
 			}
 
+			public void RecordFinalization(
+				int itemCount,
+				long desktopIniElapsedTicks,
+				long adaptiveLayoutElapsedTicks,
+				long snapshotElapsedTicks,
+				long selectionElapsedTicks)
+			{
+				var totalElapsedTicks = desktopIniElapsedTicks + adaptiveLayoutElapsedTicks + snapshotElapsedTicks + selectionElapsedTicks;
+				if (itemCount < 1024 && TicksToMilliseconds(totalElapsedTicks) < 50)
+					return;
+
+				App.Logger.LogInformation(
+					"Folder load {CorrelationId} finalized {ItemCount} items in {ElapsedMs:F1} ms (desktop.ini/adaptive layout/navigation snapshot/selection: {DesktopIniMs:F1}/{AdaptiveLayoutMs:F1}/{SnapshotMs:F1}/{SelectionMs:F1} ms).",
+					CorrelationId,
+					itemCount,
+					TicksToMilliseconds(totalElapsedTicks),
+					TicksToMilliseconds(desktopIniElapsedTicks),
+					TicksToMilliseconds(adaptiveLayoutElapsedTicks),
+					TicksToMilliseconds(snapshotElapsedTicks),
+					TicksToMilliseconds(selectionElapsedTicks));
+			}
+
 			public void RecordDetachedShellWork(Task shellWork)
 			{
 				var detachedTimestamp = Stopwatch.GetTimestamp();

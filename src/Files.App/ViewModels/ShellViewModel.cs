@@ -59,7 +59,7 @@ namespace Files.App.ViewModels
 
 		private Task? aProcessQueueAction;
 		private Task? gitProcessQueueAction;
-		private volatile Task? desktopIniUpdateTask;
+		private Task<List<IniSectionDataItem>>? desktopIniReadTask;
 
 		// Files and folders list for manipulating
 		private ConcurrentCollection<ListedItem> filesAndFolders;
@@ -256,12 +256,7 @@ namespace Files.App.ViewModels
 
 			WorkingDirectory = value;
 
-			string? pathRoot = null;
-			if (!FtpHelpers.IsFtpPath(WorkingDirectory))
-			{
-				pathRoot = Path.GetPathRoot(WorkingDirectory);
-			}
-
+			var pathRoot = FtpHelpers.IsFtpPath(value) ? null : Path.GetPathRoot(value);
 			if (TryGetFolderNavigationSnapshotGitContext(value, out var cachedGitDirectory, out var cachedGitHead, out var cachedIsValidGitDirectory))
 			{
 				GitDirectory = cachedGitDirectory;
@@ -271,31 +266,29 @@ namespace Files.App.ViewModels
 					"Reused Git context for {Path} from a recent folder snapshot (repository: {IsRepository}).",
 					LogPathHelper.GetPathIdentifier(value),
 					IsValidGitDirectory);
-				if (TryStartFolderNavigationSnapshotGitContextRefresh(value))
-					_ = RefreshSnapshotGitContextAsync(value, pathRoot, cachedGitDirectory, cachedGitHead, cachedIsValidGitDirectory);
+				if (TryStartGitContextRefresh(value))
+					_ = RefreshGitContextAsync(value, pathRoot, cachedGitDirectory, cachedGitHead, cachedIsValidGitDirectory, refreshRepositoryPath: true);
 			}
 			else
 			{
-				var gitDetectionStartedTimestamp = Stopwatch.GetTimestamp();
 				var gitPathDetectionStartedTimestamp = Stopwatch.GetTimestamp();
 				var gitDirectory = await Task.Run(() => GitHelpers.GetGitRepositoryPath(value, pathRoot));
 				var gitPathDetectionElapsed = Stopwatch.GetElapsedTime(gitPathDetectionStartedTimestamp);
-				var gitHeadDetectionStartedTimestamp = Stopwatch.GetTimestamp();
-				var gitHead = await GitHelpers.GetRepositoryHead(gitDirectory);
-				var gitHeadDetectionElapsed = Stopwatch.GetElapsedTime(gitHeadDetectionStartedTimestamp);
 				if (!string.Equals(WorkingDirectory, value, StringComparison.OrdinalIgnoreCase))
 					return;
 
 				GitDirectory = gitDirectory;
-				GitHead = gitHead;
-				IsValidGitDirectory = !string.IsNullOrEmpty(GitHead?.Name);
+				GitHead = null;
+				IsValidGitDirectory = !string.IsNullOrEmpty(gitDirectory);
 				App.Logger.LogInformation(
-					"Git repository detection for {Path} completed in {ElapsedMs:F1} ms (path scan: {PathScanMs:F1} ms, HEAD: {HeadMs:F1} ms, repository: {IsRepository}).",
+					"Git repository marker detection for {Path} completed in {ElapsedMs:F1} ms (repository marker: {HasRepositoryMarker}, HEAD deferred: {HeadDeferred}).",
 					LogPathHelper.GetPathIdentifier(WorkingDirectory),
-					Stopwatch.GetElapsedTime(gitDetectionStartedTimestamp).TotalMilliseconds,
 					gitPathDetectionElapsed.TotalMilliseconds,
-					gitHeadDetectionElapsed.TotalMilliseconds,
+					IsValidGitDirectory,
 					IsValidGitDirectory);
+
+				if (IsValidGitDirectory && TryStartGitContextRefresh(value))
+					_ = RefreshGitContextAsync(value, pathRoot, gitDirectory, null, true, refreshRepositoryPath: false);
 			}
 
 			_ = UpdateFolderThumbnailImageSource();
@@ -304,17 +297,20 @@ namespace Files.App.ViewModels
 			OnPropertyChanged(nameof(ShowFilterHeader));
 		}
 
-		private async Task RefreshSnapshotGitContextAsync(
+		private async Task RefreshGitContextAsync(
 			string path,
 			string? pathRoot,
 			string? cachedGitDirectory,
 			BranchItem? cachedGitHead,
-			bool cachedIsValidGitDirectory)
+			bool cachedIsValidGitDirectory,
+			bool refreshRepositoryPath)
 		{
 			try
 			{
 				var startedTimestamp = Stopwatch.GetTimestamp();
-				var gitDirectory = await Task.Run(() => GitHelpers.GetGitRepositoryPath(path, pathRoot));
+				var gitDirectory = refreshRepositoryPath
+					? await Task.Run(() => GitHelpers.GetGitRepositoryPath(path, pathRoot))
+					: cachedGitDirectory;
 				var gitHead = await GitHelpers.GetRepositoryHead(gitDirectory);
 				var isValidGitDirectory = !string.IsNullOrEmpty(gitHead?.Name);
 				UpdateFolderNavigationSnapshotGitContext(path, gitDirectory, gitHead, isValidGitDirectory);
@@ -330,7 +326,7 @@ namespace Files.App.ViewModels
 				GitHead = gitHead;
 				IsValidGitDirectory = isValidGitDirectory;
 				App.Logger.LogInformation(
-					"Refreshed reused Git context for {Path} in {ElapsedMs:F1} ms (repository changed: {RepositoryChanged}, HEAD changed: {HeadChanged}).",
+					"Refreshed Git context for {Path} in {ElapsedMs:F1} ms (repository changed: {RepositoryChanged}, HEAD changed: {HeadChanged}).",
 					LogPathHelper.GetPathIdentifier(path),
 					Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds,
 					repositoryChanged,
@@ -339,15 +335,22 @@ namespace Files.App.ViewModels
 				if (repositoryChanged)
 					await dispatcherQueue.EnqueueOrInvokeAsync(() => RefreshItems(null));
 				else if (headChanged)
-					await dispatcherQueue.EnqueueOrInvokeAsync(() => GitDirectoryUpdated?.Invoke(null, EventArgs.Empty));
+				{
+					await Task.Delay(50).ConfigureAwait(false);
+					dispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+					{
+						if (Volatile.Read(ref isFolderLoadInProgress) == 0)
+							DirectoryInfoUpdated?.Invoke(this, EventArgs.Empty);
+					});
+				}
 			}
 			catch (Exception ex)
 			{
-				App.Logger.LogWarning(ex, "Failed to refresh reused Git context for {Path}.", LogPathHelper.GetPathIdentifier(path));
+				App.Logger.LogWarning(ex, "Failed to refresh Git context for {Path}.", LogPathHelper.GetPathIdentifier(path));
 			}
 			finally
 			{
-				CompleteFolderNavigationSnapshotGitContextRefresh(path);
+				CompleteGitContextRefresh(path);
 			}
 		}
 
@@ -1306,7 +1309,11 @@ namespace Files.App.ViewModels
 				var collectionUpdateRequestedTimestamp = Stopwatch.GetTimestamp();
 				await bulkOperationSemaphore.WaitAsync(cancellationToken);
 				var dispatcherEnqueuedTimestamp = Stopwatch.GetTimestamp();
-				var dispatcherPriority = !isFinalBatch && loadMetrics?.HasPublishedFirstBatch is true
+				var promoteLargeProgressiveBatch = !isFinalBatch &&
+					visibleNewItems.Count >= MinProgressiveBatchResetItems;
+				var dispatcherPriority = !isFinalBatch &&
+					!promoteLargeProgressiveBatch &&
+					loadMetrics?.HasPublishedFirstBatch is true
 					? Microsoft.UI.Dispatching.DispatcherQueuePriority.Low
 					: Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal;
 				var isSemaphoreReleased = false;
@@ -1320,23 +1327,60 @@ namespace Files.App.ViewModels
 								return;
 							var collectionUpdateStartedTimestamp = Stopwatch.GetTimestamp();
 							var isFirstVisibleBatch = FilesAndFolders.Count == 0;
+							var useInitialReset = isFirstVisibleBatch;
+							var useLargeBatchReset = !isFirstVisibleBatch &&
+								orderedNewItems.Count >= MinProgressiveBatchResetItems;
+							var useReset = useInitialReset || useLargeBatchReset;
+							var collectionNotificationCount = useReset ? 1 : orderedNewItems.Count;
 
-							var collectionNotificationCount = orderedNewItems.Count;
-
-							var insertionRanges = CreateSortedInsertionRanges(FilesAndFolders.ToList(), orderedNewItems, comparer);
-							foreach (var range in insertionRanges)
+							if (useReset)
 							{
-								if (range.Items.Count == 1)
-									FilesAndFolders.Insert(range.Index, range.Items[0]);
-								else
-									FilesAndFolders.InsertRange(range.Index, range.Items);
+								IReadOnlySet<string> selectedPaths = useLargeBatchReset &&
+									ReferenceEquals(ContentPageContext.ShellPage?.ShellViewModel, this)
+									? ContentPageContext.SelectedItems.Select(item => item.ItemPath).ToHashSet(StringComparer.OrdinalIgnoreCase)
+									: new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+								var scrollPosition = useLargeBatchReset
+									? ContentPageContext.ShellPage?.SlimContentPage.CaptureScrollPosition()
+									: null;
+								var targetItems = useLargeBatchReset
+									? MergeSortedItems(FilesAndFolders.ToList(), orderedNewItems, comparer)
+									: orderedNewItems;
+								FilesAndFolders.BeginBulkOperation();
+								try
+								{
+									if (useLargeBatchReset)
+										FilesAndFolders.Clear();
+									FilesAndFolders.AddRange(targetItems);
+									if (folderSettings.DirectoryGroupOption != GroupOption.None)
+										OrderGroups();
+								}
+								finally
+								{
+									FilesAndFolders.EndBulkOperation();
+								}
+								if (useLargeBatchReset && scrollPosition is Point position &&
+									(position.X > 0.5 || position.Y > 0.5))
+								{
+									ContentPageContext.ShellPage?.SlimContentPage.RestoreScrollPosition(position);
+								}
+								if (selectedPaths.Count > 0)
+								{
+									var selectedItems = FilesAndFolders.Where(item => selectedPaths.Contains(item.ItemPath)).ToList();
+									if (selectedItems.Count > 0)
+										ContentPageContext.ShellPage!.SlimContentPage.ItemManipulationModel.SetSelectedItems(selectedItems);
+								}
 							}
-							collectionNotificationCount = insertionRanges.Count;
+							else
+							{
+								var insertionRanges = CreateSortedInsertionRanges(FilesAndFolders.ToList(), orderedNewItems, comparer);
+								foreach (var range in insertionRanges)
+									InsertItemsWithCompatibleNotifications(range.Index, range.Items);
+							}
 
-							if (folderSettings.DirectoryGroupOption != GroupOption.None)
+							if (!useReset && folderSettings.DirectoryGroupOption != GroupOption.None)
 								OrderGroupsWithMoves();
 
-							loadMetrics?.RecordCollectionUpdate(incremental: true, visibleNewItems.Count, collectionNotificationCount, collectionUpdateRequestedTimestamp, dispatcherEnqueuedTimestamp, collectionUpdateStartedTimestamp);
+							loadMetrics?.RecordCollectionUpdate(incremental: !useReset, visibleNewItems.Count, collectionNotificationCount, collectionUpdateRequestedTimestamp, dispatcherEnqueuedTimestamp, collectionUpdateStartedTimestamp);
 							loadMetrics?.RecordFirstBatch(FilesAndFolders.Count);
 							if (isFirstVisibleBatch)
 							{
@@ -1712,6 +1756,8 @@ namespace Files.App.ViewModels
 		}
 
 		private bool isLoadingItems = false;
+		private int isFolderLoadInProgress;
+		public bool IsFolderLoadInProgress => Volatile.Read(ref isFolderLoadInProgress) != 0;
 		public bool IsLoadingItems
 		{
 			get
@@ -2460,6 +2506,7 @@ namespace Files.App.ViewModels
 
 			try
 			{
+				Volatile.Write(ref isFolderLoadInProgress, 1);
 				Volatile.Write(ref activeFolderLoadMetrics, loadMetrics);
 				loadMetrics.RecordStarted();
 
@@ -2467,7 +2514,7 @@ namespace Files.App.ViewModels
 
 				filesAndFolders.Clear();
 				FilesAndFolders.Clear();
-				desktopIniUpdateTask = null;
+				desktopIniReadTask = null;
 				IReadOnlyList<ListedItem> snapshotItems = [];
 				IReadOnlySet<string> snapshotSelectionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 				var snapshotAge = TimeSpan.Zero;
@@ -2515,15 +2562,28 @@ namespace Files.App.ViewModels
 				loadCancellationToken.ThrowIfCancellationRequested();
 
 				ItemLoadStatusChanged?.Invoke(this, new ItemLoadStatusChangedEventArgs() { Status = ItemLoadStatusChangedEventArgs.ItemLoadStatus.Complete, PreviousDirectory = previousDir, Path = path });
-				if (ReferenceEquals(addFilesCTS, loadCancellationSource))
-					IsLoadingItems = false;
 
-				if (Interlocked.Exchange(ref desktopIniUpdateTask, null) is Task task)
-					await task;
+				var finalizationStartedTimestamp = Stopwatch.GetTimestamp();
+				if (Interlocked.Exchange(ref desktopIniReadTask, null) is Task<List<IniSectionDataItem>> desktopIniTask)
+				{
+					DesktopIni = await desktopIniTask;
+					CheckForBackgroundImage();
+					FilesAndFoldersFilter = null;
+				}
+				var desktopIniCompletedTimestamp = Stopwatch.GetTimestamp();
 
 				AdaptiveLayoutHelpers.ApplyAdaptativeLayout(folderSettings, filesAndFolders.ToList());
+				var adaptiveLayoutCompletedTimestamp = Stopwatch.GetTimestamp();
 				CaptureFolderNavigationSnapshot(path);
+				var snapshotCompletedTimestamp = Stopwatch.GetTimestamp();
 				await RestoreSelectionAfterRefreshAsync(selectionPathsToRestore);
+				var selectionCompletedTimestamp = Stopwatch.GetTimestamp();
+				loadMetrics.RecordFinalization(
+					filesAndFolders.Count,
+					desktopIniCompletedTimestamp - finalizationStartedTimestamp,
+					adaptiveLayoutCompletedTimestamp - desktopIniCompletedTimestamp,
+					snapshotCompletedTimestamp - adaptiveLayoutCompletedTimestamp,
+					selectionCompletedTimestamp - snapshotCompletedTimestamp);
 				loadCompleted = true;
 			}
 			catch (OperationCanceledException) when (loadCancellationToken.IsCancellationRequested)
@@ -2531,11 +2591,14 @@ namespace Files.App.ViewModels
 			}
 			finally
 			{
+				Volatile.Write(ref isFolderLoadInProgress, 0);
 				// Make sure item count is updated
 				if (ReferenceEquals(addFilesCTS, loadCancellationSource))
 					DirectoryInfoUpdated?.Invoke(this, EventArgs.Empty);
 				loadMetrics.RecordCompleted(filesAndFolders.Count, loadCompleted);
 				enumFolderSemaphore.Release();
+				if (ReferenceEquals(addFilesCTS, loadCancellationSource))
+					IsLoadingItems = false;
 			}
 
 			if (loadCompleted)
@@ -2831,6 +2894,9 @@ namespace Files.App.ViewModels
 				}
 				else
 				{
+					desktopIniReadTask ??= Task.Run(
+						() => WindowsIniService.GetData(Path.Combine(path, "desktop.ini")),
+						cancellationToken);
 					var progressiveUpdates = suppressIntermediateUpdates
 						? null
 						: new ProgressiveCollectionUpdateCoalescer(this, loadMetrics, cancellationToken);
@@ -2874,17 +2940,9 @@ namespace Files.App.ViewModels
 							loadMetrics,
 							tryReuseDisplayedOrder: folderSettings.DirectoryGroupOption == GroupOption.None);
 						await ApplyFilesAndFoldersChangesAsync(loadMetrics, cancellationToken);
-						// Not awaited here: with Low priority these don't run until the UI thread goes idle
+						// Not awaited here: with Low priority this doesn't run until the UI thread goes idle
 						// after the final list update, which would delay load completion and watcher setup.
-						// The desktop.ini task is awaited before applying the adaptive layout, which reads DesktopIni.
 						_ = dispatcherQueue.EnqueueOrInvokeAsync(CheckForSolutionFile, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
-						desktopIniUpdateTask = dispatcherQueue.EnqueueOrInvokeAsync(() =>
-						{
-							GetDesktopIniFileData();
-							CheckForBackgroundImage();
-							FilesAndFoldersFilter = null;
-						},
-						Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
 					});
 					cancellationToken.ThrowIfCancellationRequested();
 
@@ -2985,12 +3043,6 @@ namespace Files.App.ViewModels
 			SolutionFilePath = filesAndFolders.ToList().AsParallel()
 				.Where(item => FileExtensionHelpers.HasExtension(item.FileExtension, ".sln", ".slnx"))
 				.FirstOrDefault()?.ItemPath;
-		}
-
-		private void GetDesktopIniFileData()
-		{
-			var path = Path.Combine(WorkingDirectory, "desktop.ini");
-			DesktopIni = WindowsIniService.GetData(path);
 		}
 
 		public void CheckForBackgroundImage()

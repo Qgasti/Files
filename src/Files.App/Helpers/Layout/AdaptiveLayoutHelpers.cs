@@ -61,14 +61,25 @@ namespace Files.App.Helpers
 
 		private static Layouts GetContentLayout(IList<ListedItem> filesAndFolders)
 		{
-			int itemCount = filesAndFolders.Count;
-			if (filesAndFolders.Count is 0)
+			var itemCount = filesAndFolders.Count;
+			if (itemCount is 0)
 				return Layouts.None;
 
-			float mediaPercentage = 100f * filesAndFolders.Count(IsMedia) / itemCount;
+			var mediaCount = 0;
+			var remainingCount = itemCount;
+			foreach (var item in filesAndFolders)
+			{
+				remainingCount--;
+				if (IsMedia(item))
+					mediaCount++;
 
-			if (mediaPercentage > 60f)
-				return Layouts.Grid;
+				if ((long)mediaCount * 100 > (long)itemCount * 60)
+					return Layouts.Grid;
+
+				if ((long)(mediaCount + remainingCount) * 100 <= (long)itemCount * 60)
+					return Layouts.Detail;
+			}
+
 			return Layouts.Detail;
 
 			static bool IsMedia(ListedItem item)

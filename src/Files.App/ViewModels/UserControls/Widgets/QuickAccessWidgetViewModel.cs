@@ -35,6 +35,8 @@ namespace Files.App.ViewModels.UserControls.Widgets
 
 		// TODO: Replace with IMutableFolder.GetWatcherAsync() once it gets implemented in IWindowsStorable
 		private readonly SystemIO.FileSystemWatcher? _quickAccessFolderWatcher;
+		private readonly SemaphoreSlim refreshSemaphore = new(1, 1);
+		private int refreshVersion;
 		private bool isDisposed;
 
 		// Constructor
@@ -71,29 +73,76 @@ namespace Files.App.ViewModels.UserControls.Widgets
 				await RefreshWidgetAsync();
 		}
 
-		public Task RefreshWidgetAsync()
+		public async Task RefreshWidgetAsync()
 		{
-			return MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(async () =>
+			var requestedVersion = Interlocked.Increment(ref refreshVersion);
+			await refreshSemaphore.WaitAsync();
+			try
 			{
-				foreach (var item in Items)
-					item.Dispose();
+				if (isDisposed || requestedVersion != Volatile.Read(ref refreshVersion))
+					return;
 
-				Items.Clear();
+				var refreshedItems = await STATask.Run(() => LoadQuickAccessItems(requestedVersion), App.Logger);
+				if (refreshedItems is null)
+					return;
 
-				await foreach (IWindowsStorable folder in HomePageContext.HomeFolder.GetQuickAccessFolderAsync(default))
+				await MainWindow.Instance.DispatcherQueue.EnqueueOrInvokeAsync(() =>
 				{
+					if (isDisposed || requestedVersion != Volatile.Read(ref refreshVersion))
+					{
+						refreshedItems.ForEach(item => item.Dispose());
+						return;
+					}
+
+					foreach (var item in Items)
+						item.Dispose();
+
+					Items.Clear();
+					foreach (var item in refreshedItems)
+						Items.Add(item);
+				}, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
+			}
+			finally
+			{
+				refreshSemaphore.Release();
+			}
+		}
+
+		private List<WidgetFolderCardItem> LoadQuickAccessItems(int requestedVersion)
+		{
+			var refreshedItems = new List<WidgetFolderCardItem>();
+			var thumbnailSize = Math.Max(1, (int)(Constants.ShellIconSizes.Large * App.AppModel.AppWindowDPI));
+			var enumerator = HomePageContext.HomeFolder.GetQuickAccessFolderAsync().GetAsyncEnumerator();
+			try
+			{
+				while (!isDisposed && requestedVersion == Volatile.Read(ref refreshVersion) &&
+					enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
+				{
+					if (enumerator.Current is not IWindowsStorable folder)
+						continue;
+
 					folder.GetPropertyValue<bool>("System.Home.IsPinned", out var isPinned);
 					folder.TryGetShellTooltip(out var tooltip);
-
-					Items.Insert(
-						Items.Count,
-						new WidgetFolderCardItem(
-							folder,
-							folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI),
-							isPinned,
-							tooltip ?? string.Empty));
+					folder.TryGetThumbnail(thumbnailSize, SIIGBF.SIIGBF_ICONONLY, out var thumbnailData);
+					refreshedItems.Add(new(
+						folder,
+						folder.GetDisplayName(SIGDN.SIGDN_PARENTRELATIVEFORUI),
+						isPinned,
+						tooltip ?? string.Empty,
+						thumbnailData));
 				}
-			});
+
+				return refreshedItems;
+			}
+			catch
+			{
+				refreshedItems.ForEach(item => item.Dispose());
+				throw;
+			}
+			finally
+			{
+				enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
+			}
 		}
 
 		public override List<ContextMenuFlyoutItemViewModel> GetItemMenuItems(WidgetCardItem item, bool isPinned, bool isFolder = false)
@@ -326,6 +375,7 @@ namespace Files.App.ViewModels.UserControls.Widgets
 				return;
 
 			isDisposed = true;
+			Interlocked.Increment(ref refreshVersion);
 			Items.CollectionChanged -= Items_CollectionChanged;
 			if (_quickAccessFolderWatcher is not null)
 			{

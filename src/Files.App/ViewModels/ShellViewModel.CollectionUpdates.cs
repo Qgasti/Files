@@ -8,7 +8,8 @@ namespace Files.App.ViewModels
 	public sealed partial class ShellViewModel
 	{
 		private const int MaxDifferentialCollectionOperations = 64;
-		private const int MaxDifferentialCollectionAffectedItems = 1024;
+		private const int MaxDifferentialCollectionAffectedItems = 64;
+		private const int MinProgressiveBatchResetItems = 1024;
 
 		private sealed class ProgressiveCollectionUpdateCoalescer(
 			ShellViewModel owner,
@@ -106,6 +107,31 @@ namespace Files.App.ViewModels
 			return ranges;
 		}
 
+		private static List<ListedItem> MergeSortedItems(
+			IReadOnlyList<ListedItem> currentItems,
+			IReadOnlyList<ListedItem> newItems,
+			IComparer<ListedItem> comparer)
+		{
+			var mergedItems = new List<ListedItem>(currentItems.Count + newItems.Count);
+			var currentIndex = 0;
+			var newIndex = 0;
+
+			while (currentIndex < currentItems.Count && newIndex < newItems.Count)
+			{
+				if (comparer.Compare(currentItems[currentIndex], newItems[newIndex]) <= 0)
+					mergedItems.Add(currentItems[currentIndex++]);
+				else
+					mergedItems.Add(newItems[newIndex++]);
+			}
+
+			while (currentIndex < currentItems.Count)
+				mergedItems.Add(currentItems[currentIndex++]);
+			while (newIndex < newItems.Count)
+				mergedItems.Add(newItems[newIndex++]);
+
+			return mergedItems;
+		}
+
 		private bool TryApplyFlatCollectionDiff(
 			IReadOnlyList<ListedItem> targetItems,
 			out int operationCount,
@@ -127,17 +153,11 @@ namespace Files.App.ViewModels
 				switch (operation.Kind)
 				{
 					case FlatCollectionOperationKind.InsertRange:
-						if (operation.Items.Count == 1)
-							FilesAndFolders.Insert(operation.Index, operation.Items[0]);
-						else
-							FilesAndFolders.InsertRange(operation.Index, operation.Items);
+						InsertItemsWithCompatibleNotifications(operation.Index, operation.Items);
 						break;
 
 					case FlatCollectionOperationKind.RemoveRange:
-						if (operation.Items.Count == 1)
-							FilesAndFolders.RemoveAt(operation.Index);
-						else
-							FilesAndFolders.RemoveRange(operation.Index, operation.Items.Count);
+						RemoveItemsWithCompatibleNotifications(operation.Index, operation.Items.Count);
 						break;
 
 					case FlatCollectionOperationKind.Move:
@@ -146,8 +166,20 @@ namespace Files.App.ViewModels
 				}
 			}
 
-			operationCount = operations.Count;
+			operationCount = operations.Sum(operation => operation.Kind == FlatCollectionOperationKind.Move ? 1 : operation.Items.Count);
 			return true;
+		}
+
+		private void InsertItemsWithCompatibleNotifications(int index, IReadOnlyList<ListedItem> items)
+		{
+			for (var offset = 0; offset < items.Count; offset++)
+				FilesAndFolders.Insert(index + offset, items[offset]);
+		}
+
+		private void RemoveItemsWithCompatibleNotifications(int index, int count)
+		{
+			for (var offset = 0; offset < count; offset++)
+				FilesAndFolders.RemoveAt(index);
 		}
 
 		private void OrderGroupsWithMoves()

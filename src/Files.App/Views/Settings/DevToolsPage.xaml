@@ -44,6 +44,18 @@
 				Style="{StaticResource App.Theme.SubtitleTextBlockStyle}"
 				Text="{helpers:ResourceString Name=DevTools}" />
 
+			<!--  Native title bar  -->
+			<wctcontrols:SettingsCard
+				Description="{helpers:ResourceString Name=UseNativeTitleBarDescription}"
+				Header="{helpers:ResourceString Name=UseNativeTitleBar}">
+				<wctcontrols:SettingsCard.HeaderIcon>
+					<FontIcon Glyph="&#xE7F8;" />
+				</wctcontrols:SettingsCard.HeaderIcon>
+				<ToggleSwitch
+					AutomationProperties.Name="{helpers:ResourceString Name=UseNativeTitleBar}"
+					IsOn="{x:Bind ViewModel.UseNativeTitleBar, Mode=TwoWay}" />
+			</wctcontrols:SettingsCard>
+
 			<!--  Display Open IDE status bar button  -->
 			<wctcontrols:SettingsExpander Header="{helpers:ResourceString Name=DisplayOpenIDE}">
 				<wctcontrols:SettingsExpander.HeaderIcon>

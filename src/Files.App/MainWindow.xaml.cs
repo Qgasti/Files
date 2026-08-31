@@ -24,6 +24,9 @@ namespace Files.App
 		private bool CanWindowToFront { get; set; } = true;
 		private readonly object _canWindowToFrontLock = new();
 
+		public event EventHandler? InteractiveMoveStarted;
+		public event EventHandler? InteractiveMoveCompleted;
+
 		public MainWindow()
 		{
 			InitializeComponent();
@@ -31,7 +34,6 @@ namespace Files.App
 			WindowHandle = WinUIEx.WindowExtensions.GetWindowHandle(this);
 			MinHeight = 316;
 			MinWidth = 416;
-			ExtendsContentIntoTitleBar = true;
 			Title = "Files";
 			PersistenceId = "FilesMainWindow";
 			AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
@@ -41,6 +43,12 @@ namespace Files.App
 			AppWindow.SetIcon(AppLifecycleHelper.AppIconPath);
 
 			WinUIEx.WindowManager.Get(this).WindowMessageReceived += WindowManager_WindowMessageReceived;
+		}
+
+		public void ApplyTitleBarPreference()
+		{
+			if (!Ioc.Default.GetRequiredService<IDevToolsSettingsService>().UseNativeTitleBar)
+				ExtendsContentIntoTitleBar = true;
 		}
 
 		public void ShowSplashScreen()
@@ -397,6 +405,11 @@ namespace Files.App
 
 		private void WindowManager_WindowMessageReceived(object? sender, WinUIEx.Messaging.WindowMessageEventArgs e)
 		{
+			if (e.Message.MessageId == Windows.Win32.PInvoke.WM_ENTERSIZEMOVE)
+				InteractiveMoveStarted?.Invoke(this, EventArgs.Empty);
+			else if (e.Message.MessageId == Windows.Win32.PInvoke.WM_EXITSIZEMOVE)
+				InteractiveMoveCompleted?.Invoke(this, EventArgs.Empty);
+
 			if ((!CanWindowToFront) && e.Message.MessageId == Windows.Win32.PInvoke.WM_WINDOWPOSCHANGING)
 			{
 				Win32Helper.ForceWindowPosition(e.Message.LParam);

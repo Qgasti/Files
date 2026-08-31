@@ -4641,7 +4641,16 @@
   <data name="RemoveTagsDescription" xml:space="preserve">
     <value>移除選取檔案的標籤</value>
   </data>
-  <data name="ConfirmRemoveTagsDialogContent" xml:space="preserve">
-    <value>是否確定移除選取檔案的標籤？</value>
-  </data>
+	<data name="ConfirmRemoveTagsDialogContent" xml:space="preserve">
+		<value>是否確定移除選取檔案的標籤？</value>
+	</data>
+	<data name="UseNativeTitleBar" xml:space="preserve">
+		<value>使用原生標題列</value>
+	</data>
+	<data name="UseNativeTitleBarDescription" xml:space="preserve">
+		<value>使用 Windows 標題列以改善拖動視窗的效能。需要重新啟動。</value>
+	</data>
+	<data name="NativeTitleBarRestartDescription" xml:space="preserve">
+		<value>重新啟動 Files 後才會套用這項變更。要立即重新啟動嗎？</value>
+	</data>
 </root>

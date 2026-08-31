@@ -4,6 +4,7 @@
 using CommunityToolkit.WinUI;
 using Files.App.Controls;
 using Files.App.UserControls.Selection;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -40,6 +41,8 @@ namespace Files.App.Views.Layouts
 		private uint currentIconSize;
 
 		private DispatcherQueueTimer? _autoFitColumnsTimer;
+		private double _interactiveMoveStartWidth = double.NaN;
+		private static readonly TimeSpan AutoFitColumnsDebounceInterval = TimeSpan.FromMilliseconds(250);
 
 		// Properties
 
@@ -183,6 +186,8 @@ namespace Files.App.Views.Layouts
 			ParentShellPageInstance.ShellViewModel.ItemLoadStatusChanged += ShellViewModel_ItemLoadStatusChanged;
 			UserSettingsService.LayoutSettingsService.PropertyChanged += LayoutSettingsService_PropertyChanged;
 			FileList.Items.VectorChanged += FileListItems_VectorChanged;
+			MainWindow.Instance.InteractiveMoveStarted += MainWindow_InteractiveMoveStarted;
+			MainWindow.Instance.InteractiveMoveCompleted += MainWindow_InteractiveMoveCompleted;
 
 			var parameters = (NavigationArguments)eventArgs.Parameter;
 			if (parameters.IsLayoutSwitch)
@@ -211,6 +216,8 @@ namespace Files.App.Views.Layouts
 			ParentShellPageInstance.ShellViewModel.ItemLoadStatusChanged -= ShellViewModel_ItemLoadStatusChanged;
 			UserSettingsService.LayoutSettingsService.PropertyChanged -= LayoutSettingsService_PropertyChanged;
 			FileList.Items.VectorChanged -= FileListItems_VectorChanged;
+			MainWindow.Instance.InteractiveMoveStarted -= MainWindow_InteractiveMoveStarted;
+			MainWindow.Instance.InteractiveMoveCompleted -= MainWindow_InteractiveMoveCompleted;
 			_autoFitColumnsTimer?.Stop();
 		}
 
@@ -224,13 +231,19 @@ namespace Files.App.Views.Layouts
 			ParentShellPageInstance.ShellViewModel.ItemLoadStatusChanged -= ShellViewModel_ItemLoadStatusChanged;
 			UserSettingsService.LayoutSettingsService.PropertyChanged -= LayoutSettingsService_PropertyChanged;
 			FileList.Items.VectorChanged -= FileListItems_VectorChanged;
+			MainWindow.Instance.InteractiveMoveStarted -= MainWindow_InteractiveMoveStarted;
+			MainWindow.Instance.InteractiveMoveCompleted -= MainWindow_InteractiveMoveCompleted;
 			_autoFitColumnsTimer?.Stop();
 			base.Dispose();
 		}
 
 		private void LayoutSettingsService_PropertyChanged(object? sender, PropertyChangedEventArgs e)
 		{
-			if (e.PropertyName == nameof(ILayoutSettingsService.DetailsViewSize))
+			if (e.PropertyName == nameof(ILayoutSettingsService.AutoSizeColumnsInDetailsLayout))
+			{
+				AutoFitColumnsIfEnabled();
+			}
+			else if (e.PropertyName == nameof(ILayoutSettingsService.DetailsViewSize))
 			{
 				// Get current scroll position
 				var previousOffset = ContentScroller?.VerticalOffset;
@@ -776,6 +789,24 @@ namespace Files.App.Views.Layouts
 		private void RootGrid_SizeChanged(object? sender, SizeChangedEventArgs? e)
 		{
 			MaxWidthForRenameTextbox = Math.Max(0, RootGrid.ActualWidth - 80);
+			AutoFitColumnsIfEnabled();
+		}
+
+		private void MainWindow_InteractiveMoveStarted(object? sender, EventArgs e)
+		{
+			_interactiveMoveStartWidth = RootGrid.ActualWidth;
+		}
+
+		private void MainWindow_InteractiveMoveCompleted(object? sender, EventArgs e)
+		{
+			var currentWidth = RootGrid.ActualWidth;
+			var widthChanged = double.IsFinite(_interactiveMoveStartWidth) &&
+				double.IsFinite(currentWidth) &&
+				Math.Abs(currentWidth - _interactiveMoveStartWidth) > 0.5;
+			_interactiveMoveStartWidth = double.NaN;
+
+			if (widthChanged)
+				AutoFitColumnsIfEnabled();
 		}
 
 		private void GridSplitter_ManipulationStarted(object sender, ManipulationStartedRoutedEventArgs e)
@@ -813,15 +844,107 @@ namespace Files.App.Views.Layouts
 			_ = Commands.AutoFitColumns.ExecuteAsync();
 		}
 
-		public void AutoFitColumns()
+		public void AutoFitColumns(bool fillAvailableWidth = false)
 		{
-			if (!FileList.Items.Any())
+			var autoFitStartedTimestamp = Stopwatch.GetTimestamp();
+			var items = FileList.Items.OfType<ListedItem>().ToList();
+			if (items.Count == 0)
+				return;
+			var previousColumnWidths = CaptureResizableColumnWidths();
+			var snapshotCompletedTimestamp = Stopwatch.GetTimestamp();
+			var maxItemLengths = CalculateMaxItemLengths(items);
+			var aggregationCompletedTimestamp = Stopwatch.GetTimestamp();
+			var columnEstimates = MeasureColumnEstimates(maxItemLengths);
+			var measurementCompletedTimestamp = Stopwatch.GetTimestamp();
+
+			// Column one is the fixed icon and selection area; resizable content columns start at two.
+			int totalColumnCount = ColumnsViewModel.GetType().GetProperties().Count(prop => prop.PropertyType == typeof(DetailsLayoutColumnItem));
+			for (int columnIndex = 2; columnIndex <= totalColumnCount; columnIndex++)
+				ApplyColumnWidth(columnIndex, maxItemLengths[columnIndex], columnEstimates[columnIndex], false);
+
+			if (fillAvailableWidth)
+				FitColumnsToAvailableWidth();
+			var columnsAppliedTimestamp = Stopwatch.GetTimestamp();
+
+			var columnsChanged = !previousColumnWidths.SequenceEqual(CaptureResizableColumnWidths());
+			if (columnsChanged)
+				FolderSettings.ColumnsViewModel = ColumnsViewModel;
+
+			var elapsed = Stopwatch.GetElapsedTime(autoFitStartedTimestamp);
+			if (items.Count >= 1024 || elapsed >= TimeSpan.FromMilliseconds(50))
+			{
+				App.Logger.LogInformation(
+					"Details auto-fit processed {ItemCount} items across {ColumnCount} columns in {ElapsedMs:F1} ms (snapshot/aggregate/measure/apply/persist: {SnapshotMs:F1}/{AggregateMs:F1}/{MeasureMs:F1}/{ApplyMs:F1}/{PersistMs:F1} ms, persisted: {Persisted}).",
+					items.Count,
+					totalColumnCount - 1,
+					elapsed.TotalMilliseconds,
+					Stopwatch.GetElapsedTime(autoFitStartedTimestamp, snapshotCompletedTimestamp).TotalMilliseconds,
+					Stopwatch.GetElapsedTime(snapshotCompletedTimestamp, aggregationCompletedTimestamp).TotalMilliseconds,
+					Stopwatch.GetElapsedTime(aggregationCompletedTimestamp, measurementCompletedTimestamp).TotalMilliseconds,
+					Stopwatch.GetElapsedTime(measurementCompletedTimestamp, columnsAppliedTimestamp).TotalMilliseconds,
+					Stopwatch.GetElapsedTime(columnsAppliedTimestamp).TotalMilliseconds,
+					columnsChanged);
+			}
+		}
+
+		private double[] CaptureResizableColumnWidths()
+		{
+			var widths = new double[15];
+			for (var columnIndex = 2; columnIndex <= 16; columnIndex++)
+				widths[columnIndex - 2] = GetDetailsColumn(columnIndex)?.UserLength.Value ?? 0;
+
+			return widths;
+		}
+
+		private void FitColumnsToAvailableWidth()
+		{
+			var availableWidth = FileList.ActualWidth;
+			if (!double.IsFinite(availableWidth) || availableWidth <= 0)
 				return;
 
-			// Scale to whatever DetailsLayoutColumnItem properties exist on ColumnsViewModel so new columns don't need a code change here.
-			int totalColumnCount = ColumnsViewModel.GetType().GetProperties().Count(prop => prop.PropertyType == typeof(DetailsLayoutColumnItem));
-			for (int columnIndex = 1; columnIndex <= totalColumnCount; columnIndex++)
-				ResizeColumnToFit(columnIndex);
+			var visibleColumns = ColumnsViewModel
+				.GetType()
+				.GetProperties()
+				.Where(property => property.PropertyType == typeof(DetailsLayoutColumnItem))
+				.Select(property => property.GetValue(ColumnsViewModel) as DetailsLayoutColumnItem)
+				.Where(column => column?.Length.Value > 0)
+				.Cast<DetailsLayoutColumnItem>()
+				.ToArray();
+			if (visibleColumns.Length == 0)
+				return;
+
+			const double headerHorizontalPadding = 24;
+			var usableWidth = Math.Max(0, availableWidth - headerHorizontalPadding);
+			var columnsWidth = visibleColumns.Sum(column => column.LengthIncludingGridSplitter.Value);
+			var remainingWidth = usableWidth - columnsWidth;
+
+			if (remainingWidth >= 0)
+			{
+				if (ColumnsViewModel.NameColumn.Length.Value == 0)
+					return;
+
+				var nameWidth = Math.Min(
+					ColumnsViewModel.NameColumn.UserLength.Value + remainingWidth,
+					ColumnsViewModel.NameColumn.NormalMaxLength);
+				ColumnsViewModel.NameColumn.UserLength = new GridLength(nameWidth, GridUnitType.Pixel);
+				return;
+			}
+
+			var resizableColumns = visibleColumns.Where(column => column.IsResizable).ToArray();
+			var fixedWidth = visibleColumns.Sum(column =>
+				(column.IsResizable ? 0 : column.Length.Value) +
+				(column.LengthIncludingGridSplitter.Value - column.Length.Value));
+			var minimumWidth = resizableColumns.Sum(column => column.NormalMinLength);
+			var flexibleWidth = resizableColumns.Sum(column => Math.Max(0, column.UserLength.Value - column.NormalMinLength));
+			var availableFlexibleWidth = Math.Max(0, usableWidth - fixedWidth - minimumWidth);
+			var scale = flexibleWidth > 0 ? Math.Min(1, availableFlexibleWidth / flexibleWidth) : 0;
+
+			foreach (var column in resizableColumns)
+			{
+				var scaledWidth = column.NormalMinLength +
+					Math.Max(0, column.UserLength.Value - column.NormalMinLength) * scale;
+				column.UserLength = new GridLength(scaledWidth, GridUnitType.Pixel);
+			}
 		}
 
 		private void AutoFitColumnsIfEnabled()
@@ -830,10 +953,25 @@ namespace Files.App.Views.Layouts
 				return;
 
 			// Trailing debounce so bursts of item adds and extended-property updates during a folder load collapse into one resize.
-			_autoFitColumnsTimer ??= DispatcherQueue.CreateTimer();
-			_autoFitColumnsTimer.Debounce(
-				() => _ = Commands.AutoFitColumns.ExecuteAsync(),
-				TimeSpan.FromMilliseconds(250));
+			if (_autoFitColumnsTimer is null)
+			{
+				_autoFitColumnsTimer = DispatcherQueue.CreateTimer();
+				_autoFitColumnsTimer.IsRepeating = false;
+				_autoFitColumnsTimer.Tick += AutoFitColumnsTimer_Tick;
+			}
+
+			_autoFitColumnsTimer.Stop();
+			_autoFitColumnsTimer.Interval = AutoFitColumnsDebounceInterval;
+			_autoFitColumnsTimer.Start();
+		}
+
+		private void AutoFitColumnsTimer_Tick(DispatcherQueueTimer sender, object args)
+		{
+			sender.Stop();
+			if (ParentShellPageInstance?.ShellViewModel.IsFolderLoadInProgress is true)
+				return;
+
+			AutoFitColumns(true);
 		}
 
 		private void ShellViewModel_ItemLoadStatusChanged(object sender, ItemLoadStatusChangedEventArgs e)
@@ -844,6 +982,9 @@ namespace Files.App.Views.Layouts
 
 		private void FileListItems_VectorChanged(IObservableVector<object> sender, IVectorChangedEventArgs e)
 		{
+			if (ParentShellPageInstance?.ShellViewModel.IsFolderLoadInProgress is true)
+				return;
+
 			AutoFitColumnsIfEnabled();
 		}
 
@@ -853,59 +994,118 @@ namespace Files.App.Views.Layouts
 			AutoFitColumnsIfEnabled();
 		}
 
-		private void ResizeColumnToFit(int columnToResize)
+		private static int[] CalculateMaxItemLengths(IReadOnlyList<ListedItem> items)
 		{
-			if (!FileList.Items.Any())
+			var maxItemLengths = new int[17];
+			maxItemLengths[16] = 20;
+
+			foreach (var item in items)
+			{
+				maxItemLengths[2] = Math.Max(maxItemLengths[2], item.Name?.Length ?? 0);
+				maxItemLengths[3] = Math.Max(maxItemLengths[3], (item as IGitItem)?.UnmergedGitStatusName?.Length ?? 0);
+				maxItemLengths[4] = Math.Max(maxItemLengths[4], (item as IGitItem)?.GitLastCommitDateHumanized?.Length ?? 0);
+				maxItemLengths[5] = Math.Max(maxItemLengths[5], (item as IGitItem)?.GitLastCommitMessage?.Length ?? 0);
+				maxItemLengths[6] = Math.Max(maxItemLengths[6], (item as IGitItem)?.GitLastCommitAuthor?.Length ?? 0);
+				maxItemLengths[7] = Math.Max(maxItemLengths[7], (item as IGitItem)?.GitLastCommitSha?.Length ?? 0);
+				maxItemLengths[8] = Math.Max(maxItemLengths[8], item.FileTagsUI?.Sum(tag => tag?.Name?.Length ?? 0) ?? 0);
+				maxItemLengths[9] = Math.Max(maxItemLengths[9], item.ItemPath?.Length ?? 0);
+				maxItemLengths[10] = Math.Max(maxItemLengths[10], (item as RecycleBinItem)?.ItemOriginalPath?.Length ?? 0);
+				maxItemLengths[11] = Math.Max(maxItemLengths[11], (item as RecycleBinItem)?.ItemDateDeleted?.Length ?? 0);
+				maxItemLengths[12] = Math.Max(maxItemLengths[12], item.ItemDateModified?.Length ?? 0);
+				maxItemLengths[13] = Math.Max(maxItemLengths[13], item.ItemDateCreated?.Length ?? 0);
+				maxItemLengths[14] = Math.Max(maxItemLengths[14], item.ItemType?.Length ?? 0);
+				maxItemLengths[15] = Math.Max(maxItemLengths[15], item.FileSize?.Length ?? 0);
+			}
+
+			return maxItemLengths;
+		}
+
+		private double[] MeasureColumnEstimates(IReadOnlyList<int> maxItemLengths)
+		{
+			var estimates = new double[17];
+			estimates[16] = maxItemLengths[16];
+			if (maxItemLengths[8] > 0 && GetDetailsColumn(8)?.Length.Value > 0)
+				estimates[8] = MeasureTagColumnEstimate(8);
+
+			var textBlocksByColumn = DependencyObjectHelpers
+				.FindChildren<TextBlock>(FileList.ItemsPanelRoot)
+				.Where(textBlock => !string.IsNullOrEmpty(textBlock.Text))
+				.Select(textBlock => (ColumnIndex: GetColumnIndex(textBlock.Name), TextBlock: textBlock))
+				.Where(entry => entry.ColumnIndex is >= 2 and <= 15 && entry.ColumnIndex != 8)
+				.GroupBy(entry => entry.ColumnIndex);
+
+			foreach (var column in textBlocksByColumn)
+			{
+				var columnIndex = column.Key;
+				if (maxItemLengths[columnIndex] == 0 || GetDetailsColumn(columnIndex)?.Length.Value <= 0)
+					continue;
+
+				var widthPerLetter = column
+					.OrderByDescending(entry => entry.TextBlock.Text.Length)
+					.Take(5)
+					.Select(entry =>
+					{
+						var textBlock = entry.TextBlock;
+						var sample = new TextBlock { Text = textBlock.Text, FontSize = textBlock.FontSize, FontFamily = textBlock.FontFamily };
+						sample.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+						return sample.DesiredSize.Width / Math.Max(1, textBlock.Text.Length);
+					})
+					.ToArray();
+				if (widthPerLetter.Length == 0)
+					continue;
+
+				var weightedAverage = (widthPerLetter.Average() + widthPerLetter.Max()) / 2;
+				estimates[columnIndex] = weightedAverage * maxItemLengths[columnIndex];
+			}
+
+			return estimates;
+		}
+
+		private void ResizeColumnToFit(int columnToResize, IReadOnlyList<ListedItem>? itemSnapshot = null, bool persistChanges = true)
+		{
+			if (GetDetailsColumn(columnToResize)?.Length.Value <= 0)
+				return;
+
+			itemSnapshot ??= FileList.Items.OfType<ListedItem>().ToList();
+			if (itemSnapshot.Count == 0)
 				return;
 
 			var maxItemLength = columnToResize switch
 			{
-				1 => 40, // Check all items columns
-				2 => FileList.Items.Cast<ListedItem>().Select(x => x.Name?.Length ?? 0).Max(), // file name column
-				4 => FileList.Items.Cast<ListedItem>().Select(x => (x as IGitItem)?.GitLastCommitDateHumanized?.Length ?? 0).Max(), // git
-				5 => FileList.Items.Cast<ListedItem>().Select(x => (x as IGitItem)?.GitLastCommitMessage?.Length ?? 0).Max(), // git
-				6 => FileList.Items.Cast<ListedItem>().Select(x => (x as IGitItem)?.GitLastCommitAuthor?.Length ?? 0).Max(), // git
-				7 => FileList.Items.Cast<ListedItem>().Select(x => (x as IGitItem)?.GitLastCommitSha?.Length ?? 0).Max(), // git
-				8 => FileList.Items.Cast<ListedItem>().Select(x => x.FileTagsUI?.Sum(x => x?.Name?.Length ?? 0) ?? 0).Max(), // file tag column
-				9 => FileList.Items.Cast<ListedItem>().Select(x => x.ItemPath?.Length ?? 0).Max(), // path column
-				10 => FileList.Items.Cast<ListedItem>().Select(x => (x as RecycleBinItem)?.ItemOriginalPath?.Length ?? 0).Max(), // original path column
-				11 => FileList.Items.Cast<ListedItem>().Select(x => (x as RecycleBinItem)?.ItemDateDeleted?.Length ?? 0).Max(), // date deleted column
-				12 => FileList.Items.Cast<ListedItem>().Select(x => x.ItemDateModified?.Length ?? 0).Max(), // date modified column
-				13 => FileList.Items.Cast<ListedItem>().Select(x => x.ItemDateCreated?.Length ?? 0).Max(), // date created column
-				14 => FileList.Items.Cast<ListedItem>().Select(x => x.ItemType?.Length ?? 0).Max(), // item type column
-				15 => FileList.Items.Cast<ListedItem>().Select(x => x.FileSize?.Length ?? 0).Max(), // item size column
-				_ => 20 // cloud status column
+				2 => itemSnapshot.Select(x => x.Name?.Length ?? 0).Max(), // file name column
+				3 => itemSnapshot.Select(x => (x as IGitItem)?.UnmergedGitStatusName?.Length ?? 0).Max(), // git status
+				4 => itemSnapshot.Select(x => (x as IGitItem)?.GitLastCommitDateHumanized?.Length ?? 0).Max(), // git
+				5 => itemSnapshot.Select(x => (x as IGitItem)?.GitLastCommitMessage?.Length ?? 0).Max(), // git
+				6 => itemSnapshot.Select(x => (x as IGitItem)?.GitLastCommitAuthor?.Length ?? 0).Max(), // git
+				7 => itemSnapshot.Select(x => (x as IGitItem)?.GitLastCommitSha?.Length ?? 0).Max(), // git
+				8 => itemSnapshot.Select(x => x.FileTagsUI?.Sum(x => x?.Name?.Length ?? 0) ?? 0).Max(), // file tag column
+				9 => itemSnapshot.Select(x => x.ItemPath?.Length ?? 0).Max(), // path column
+				10 => itemSnapshot.Select(x => (x as RecycleBinItem)?.ItemOriginalPath?.Length ?? 0).Max(), // original path column
+				11 => itemSnapshot.Select(x => (x as RecycleBinItem)?.ItemDateDeleted?.Length ?? 0).Max(), // date deleted column
+				12 => itemSnapshot.Select(x => x.ItemDateModified?.Length ?? 0).Max(), // date modified column
+				13 => itemSnapshot.Select(x => x.ItemDateCreated?.Length ?? 0).Max(), // date created column
+				14 => itemSnapshot.Select(x => x.ItemType?.Length ?? 0).Max(), // item type column
+				15 => itemSnapshot.Select(x => x.FileSize?.Length ?? 0).Max(), // item size column
+				16 => 20, // cloud status column
+				_ => 0
 			};
 
-			// if called programmatically, the column could be hidden
-			// in this case, resizing doesn't need to be done at all
 			if (maxItemLength == 0)
 				return;
 
 			var columnSizeToFit = MeasureColumnEstimate(columnToResize, 5, maxItemLength);
+			ApplyColumnWidth(columnToResize, maxItemLength, columnSizeToFit, persistChanges);
+		}
 
-			if (columnSizeToFit > 1)
+		private void ApplyColumnWidth(int columnIndex, int maxItemLength, double columnSizeToFit, bool persistChanges)
+		{
+			var column = GetDetailsColumn(columnIndex);
+			if (column is null || column.Length.Value <= 0 || maxItemLength == 0)
+				return;
+
+			if (double.IsFinite(columnSizeToFit) && columnSizeToFit > 1)
 			{
-				var column = columnToResize switch
-				{
-					2 => ColumnsViewModel.NameColumn,
-					3 => ColumnsViewModel.GitStatusColumn,
-					4 => ColumnsViewModel.GitLastCommitDateColumn,
-					5 => ColumnsViewModel.GitLastCommitMessageColumn,
-					6 => ColumnsViewModel.GitCommitAuthorColumn,
-					7 => ColumnsViewModel.GitLastCommitShaColumn,
-					8 => ColumnsViewModel.TagColumn,
-					9 => ColumnsViewModel.PathColumn,
-					10 => ColumnsViewModel.OriginalPathColumn,
-					11 => ColumnsViewModel.DateDeletedColumn,
-					12 => ColumnsViewModel.DateModifiedColumn,
-					13 => ColumnsViewModel.DateCreatedColumn,
-					14 => ColumnsViewModel.ItemTypeColumn,
-					15 => ColumnsViewModel.SizeColumn,
-					_ => ColumnsViewModel.StatusColumn
-				};
-
-				if (columnToResize == 2) // file name column
+				if (columnIndex == 2) // file name column
 					columnSizeToFit += 20;
 
 				var minFitLength = Math.Max(columnSizeToFit, column.NormalMinLength);
@@ -914,12 +1114,34 @@ namespace Files.App.Views.Layouts
 				column.UserLength = new GridLength(maxFitLength, GridUnitType.Pixel);
 			}
 
-			FolderSettings.ColumnsViewModel = ColumnsViewModel;
+			if (persistChanges)
+				FolderSettings.ColumnsViewModel = ColumnsViewModel;
 		}
+
+		private DetailsLayoutColumnItem? GetDetailsColumn(int columnIndex)
+			=> columnIndex switch
+			{
+				2 => ColumnsViewModel.NameColumn,
+				3 => ColumnsViewModel.GitStatusColumn,
+				4 => ColumnsViewModel.GitLastCommitDateColumn,
+				5 => ColumnsViewModel.GitLastCommitMessageColumn,
+				6 => ColumnsViewModel.GitCommitAuthorColumn,
+				7 => ColumnsViewModel.GitLastCommitShaColumn,
+				8 => ColumnsViewModel.TagColumn,
+				9 => ColumnsViewModel.PathColumn,
+				10 => ColumnsViewModel.OriginalPathColumn,
+				11 => ColumnsViewModel.DateDeletedColumn,
+				12 => ColumnsViewModel.DateModifiedColumn,
+				13 => ColumnsViewModel.DateCreatedColumn,
+				14 => ColumnsViewModel.ItemTypeColumn,
+				15 => ColumnsViewModel.SizeColumn,
+				16 => ColumnsViewModel.StatusColumn,
+				_ => null
+			};
 
 		private double MeasureColumnEstimate(int columnIndex, int measureItemsCount, int maxItemLength)
 		{
-			if (columnIndex == 15) // sync status
+			if (columnIndex == 16) // sync status
 				return maxItemLength;
 
 			if (columnIndex == 8) // file tag
@@ -932,26 +1154,35 @@ namespace Files.App.Views.Layouts
 		{
 			var grids = DependencyObjectHelpers
 				.FindChildren<Grid>(FileList.ItemsPanelRoot)
-				.Where(grid => IsCorrectColumn(grid, columnIndex));
-
-			// Get the list of stack panels with the most letters
-			var stackPanels = grids
-				.Select(DependencyObjectHelpers.FindChildren<StackPanel>)
-				.OrderByDescending(sps => sps.Select(sp => DependencyObjectHelpers.FindChildren<TextBlock>(sp).Select(tb => tb.Text.Length).Sum()).Sum())
-				.First()
+				.Where(grid => IsCorrectColumn(grid, columnIndex))
 				.ToArray();
 
-			var mesuredSize = stackPanels.Select(x =>
-			{
-				x.Measure(new Size(Double.PositiveInfinity, Double.PositiveInfinity));
+			return grids
+				.Select(grid =>
+				{
+					var tagWidths = DependencyObjectHelpers
+						.FindChildren<StackPanel>(grid)
+						.Select(tag => DependencyObjectHelpers
+							.FindChildren<TextBlock>(tag)
+							.Where(textBlock => !string.IsNullOrEmpty(textBlock.Text))
+							.Select(textBlock =>
+							{
+								var sample = new TextBlock
+								{
+									Text = textBlock.Text,
+									FontSize = textBlock.FontSize,
+									FontFamily = textBlock.FontFamily
+								};
+								sample.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+								return sample.DesiredSize.Width;
+							})
+							.Sum() + 40)
+						.ToArray();
 
-				return x.DesiredSize.Width;
-			}).Sum();
-
-			if (stackPanels.Length >= 2)
-				mesuredSize += 4 * (stackPanels.Length - 1); // The spacing between the tags
-
-			return mesuredSize;
+					return tagWidths.Sum() + Math.Max(0, tagWidths.Length - 1) * 4;
+				})
+				.DefaultIfEmpty(0)
+				.Max();
 		}
 
 		private double MeasureTextColumnEstimate(int columnIndex, int measureItemsCount, int maxItemLength)
@@ -983,8 +1214,11 @@ namespace Files.App.Views.Layouts
 		}
 
 		private bool IsCorrectColumn(FrameworkElement element, int columnIndex)
+			=> GetColumnIndex(element.Name) == columnIndex;
+
+		private static int GetColumnIndex(string elementName)
 		{
-			int columnIndexFromName = element.Name switch
+			return elementName switch
 			{
 				"ItemName" => 2,
 				"ItemGitStatusTextBlock" => 3,
@@ -1003,8 +1237,6 @@ namespace Files.App.Views.Layouts
 				"ItemStatus" => 16,
 				_ => -1,
 			};
-
-			return columnIndexFromName != -1 && columnIndexFromName == columnIndex;
 		}
 
 		private void FileList_Loaded(object sender, RoutedEventArgs e)

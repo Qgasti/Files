@@ -24,6 +24,8 @@ namespace Files.App.Views.Shells
 		private Task _gitFetch = Task.CompletedTask;
 
 		private CancellationTokenSource _gitFetchToken = new CancellationTokenSource();
+		private bool _isAutomaticGitFetchPending;
+		private bool _allowPendingGitFetchWhileGitActionIsFinishing;
 		private BranchItem? _gitHead;
 		private StatusBarViewModel? _gitStatusTarget;
 
@@ -262,8 +264,10 @@ namespace Files.App.Views.Shells
 			var gitContextChanged =
 				!string.Equals(InstanceViewModel.GitRepositoryPath, ShellViewModel.GitDirectory, StringComparison.OrdinalIgnoreCase) ||
 				InstanceViewModel.IsGitRepository != ShellViewModel.IsValidGitDirectory;
+			var gitHeadChanged = !Equals(_gitHead, ShellViewModel.GitHead);
+			var isGitFetchCanceled = false;
 
-			if (gitContextChanged)
+			if (gitContextChanged || gitHeadChanged)
 			{
 				InstanceViewModel.GitRepositoryPath = ShellViewModel.GitDirectory;
 				InstanceViewModel.IsGitRepository = ShellViewModel.IsValidGitDirectory;
@@ -273,26 +277,26 @@ namespace Files.App.Views.Shells
 					? _gitHead.Name
 					: string.Empty;
 
-				var isGitFetchCanceled = false;
-				if (!_gitFetch.IsCompleted)
+				if (gitContextChanged && !_gitFetch.IsCompleted)
 				{
 					_gitFetchToken.Cancel();
 					_gitFetchToken = new CancellationTokenSource();
 					isGitFetchCanceled = true;
 				}
-				if (InstanceViewModel.IsGitRepository && (!GitHelpers.IsExecutingGitAction || isGitFetchCanceled))
+				if (gitContextChanged)
 				{
-					var repositoryPath = InstanceViewModel.GitRepositoryPath;
-					_gitFetch = GitHelpers.FetchOriginAsync(repositoryPath, _gitFetchToken.Token);
+					_isAutomaticGitFetchPending = InstanceViewModel.IsGitRepository;
+					_allowPendingGitFetchWhileGitActionIsFinishing = isGitFetchCanceled && InstanceViewModel.IsGitRepository;
 				}
 			}
+			TryStartPendingGitFetch(isGitFetchCanceled);
 
 			var contentPage = ContentPage;
 			if (contentPage is null)
 				return;
 
 			if (!GitHelpers.IsExecutingGitAction &&
-				(gitContextChanged || !ReferenceEquals(_gitStatusTarget, contentPage.StatusBarViewModel)))
+				(gitContextChanged || gitHeadChanged || !ReferenceEquals(_gitStatusTarget, contentPage.StatusBarViewModel)))
 			{
 				contentPage.StatusBarViewModel.UpdateGitInfo(
 					InstanceViewModel.IsGitRepository,
@@ -304,6 +308,22 @@ namespace Files.App.Views.Shells
 			contentPage.StatusBarViewModel.DirectoryItemCount = $"{ShellViewModel.FilesAndFolders.Count} {directoryItemCountLocalization}";
 			contentPage.InfoPaneViewModel.DirectoryItemCount = $"{ShellViewModel.FilesAndFolders.Count} {directoryItemCountLocalization}";
 			contentPage.UpdateSelectionSize();
+		}
+
+		private void TryStartPendingGitFetch(bool allowWhileGitActionIsFinishing = false)
+		{
+			allowWhileGitActionIsFinishing |= _allowPendingGitFetchWhileGitActionIsFinishing;
+			if (!_isAutomaticGitFetchPending ||
+				ShellViewModel.IsFolderLoadInProgress ||
+				!InstanceViewModel.IsGitRepository ||
+				(GitHelpers.IsExecutingGitAction && !allowWhileGitActionIsFinishing))
+			{
+				return;
+			}
+
+			_isAutomaticGitFetchPending = false;
+			_allowPendingGitFetchWhileGitActionIsFinishing = false;
+			_gitFetch = GitHelpers.FetchOriginAsync(InstanceViewModel.GitRepositoryPath, _gitFetchToken.Token);
 		}
 
 		protected async void FilesystemViewModel_GitDirectoryUpdated(object sender, EventArgs e)
@@ -330,6 +350,7 @@ namespace Files.App.Views.Shells
 			var statusBarViewModel = ContentPage?.StatusBarViewModel;
 			statusBarViewModel?.UpdateGitInfo(isGitRepository, repositoryPath, head);
 			_gitStatusTarget = statusBarViewModel;
+			TryStartPendingGitFetch();
 		}
 
 		protected async void GitCheckout_Required(object? sender, string branchName)

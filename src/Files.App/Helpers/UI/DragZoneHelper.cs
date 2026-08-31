@@ -20,7 +20,7 @@ namespace Files.App.Helpers
 		/// <param name="setTitleBarDragRegion"></param>
 		public static void RaiseSetTitleBarDragRegion(this Window window, SetTitleBarDragRegionDelegate setTitleBarDragRegion)
 		{
-			if (!window.AppWindow.IsVisible)
+			if (!window.ExtendsContentIntoTitleBar || !window.AppWindow.IsVisible)
 				return;
 			// UIElement.RasterizationScale is always 1
 			var source = InputNonClientPointerSource.GetForWindowId(window.AppWindow.Id);

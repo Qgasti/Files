@@ -62,6 +62,12 @@ namespace Files.App.Helpers
 		private VisualInteractionSource _source;
 		private InteractionTrackerOwner _trackerOwner;
 		private CompositionPropertySet _props;
+		private ExpressionAnimation _backAnimation;
+		private ExpressionAnimation _forwardAnimation;
+
+		private bool _isWindowActive = true;
+		private bool _isInteractiveMoveActive;
+		private bool _areAnimationsRunning;
 
 		public event EventHandler<OverscrollNavigationEventArgs>? NavigationRequested;
 
@@ -86,6 +92,9 @@ namespace Files.App.Helpers
 			CanNavigateForward = false;
 
 			SetupAnimations();
+			MainWindow.Instance.Activated += MainWindow_Activated;
+			MainWindow.Instance.InteractiveMoveStarted += MainWindow_InteractiveMoveStarted;
+			MainWindow.Instance.InteractiveMoveCompleted += MainWindow_InteractiveMoveCompleted;
 
 			_pointerPressedHandler = new(PointerPressed);
 			_rootElement.AddHandler(UIElement.PointerPressedEvent, _pointerPressedHandler, true);
@@ -109,6 +118,7 @@ namespace Files.App.Helpers
 			_tracker.InteractionSources.Add(_source);
 		}
 
+		[MemberNotNull(nameof(_backAnimation), nameof(_forwardAnimation))]
 		private void SetupAnimations()
 		{
 			var compositor = _rootVisual.Compositor;
@@ -118,15 +128,62 @@ namespace Files.App.Helpers
 			List<CompositionConditionalValue> conditionalValues = [backResistance, forwardResistance];
 			_source.ConfigureDeltaPositionXModifiers(conditionalValues);
 
-			var backAnim = compositor.CreateExpressionAnimation("(-clamp(tracker.Position.X, -96, 0) * 2) - 48");
-			backAnim.SetReferenceParameter("tracker", _tracker);
-			backAnim.SetReferenceParameter("props", _props);
-			_backVisual.StartAnimation("Translation.X", backAnim);
+			_backAnimation = compositor.CreateExpressionAnimation("(-clamp(tracker.Position.X, -96, 0) * 2) - 48");
+			_backAnimation.SetReferenceParameter("tracker", _tracker);
 
-			var forwardAnim = compositor.CreateExpressionAnimation("(-clamp(tracker.Position.X, 0, 96) * 2) + 48");
-			forwardAnim.SetReferenceParameter("tracker", _tracker);
-			forwardAnim.SetReferenceParameter("props", _props);
-			_forwardVisual.StartAnimation("Translation.X", forwardAnim);
+			_forwardAnimation = compositor.CreateExpressionAnimation("(-clamp(tracker.Position.X, 0, 96) * 2) + 48");
+			_forwardAnimation.SetReferenceParameter("tracker", _tracker);
+
+			ResumeAnimations();
+		}
+
+		private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
+		{
+			_isWindowActive = args.WindowActivationState != WindowActivationState.Deactivated;
+			UpdateAnimationState();
+		}
+
+		private void MainWindow_InteractiveMoveStarted(object? sender, EventArgs e)
+		{
+			_isInteractiveMoveActive = true;
+			UpdateAnimationState();
+		}
+
+		private void MainWindow_InteractiveMoveCompleted(object? sender, EventArgs e)
+		{
+			_isInteractiveMoveActive = false;
+			UpdateAnimationState();
+		}
+
+		private void UpdateAnimationState()
+		{
+			if (_isWindowActive && !_isInteractiveMoveActive)
+				ResumeAnimations();
+			else
+				PauseAnimations();
+		}
+
+		private void ResumeAnimations()
+		{
+			if (_disposed || _areAnimationsRunning)
+				return;
+
+			_backVisual.StartAnimation("Translation.X", _backAnimation);
+			_forwardVisual.StartAnimation("Translation.X", _forwardAnimation);
+			_areAnimationsRunning = true;
+		}
+
+		private void PauseAnimations()
+		{
+			if (_disposed || !_areAnimationsRunning)
+				return;
+
+			_tracker.TryUpdatePosition(new(0f));
+			_backVisual.StopAnimation("Translation.X");
+			_forwardVisual.StopAnimation("Translation.X");
+			_backVisual.Properties.InsertVector3("Translation", new(-48f, 0f, 0f));
+			_forwardVisual.Properties.InsertVector3("Translation", new(48f, 0f, 0f));
+			_areAnimationsRunning = false;
 		}
 
 		private void PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -165,9 +222,14 @@ namespace Files.App.Helpers
 
 			_disposed = true;
 
+			MainWindow.Instance.Activated -= MainWindow_Activated;
+			MainWindow.Instance.InteractiveMoveStarted -= MainWindow_InteractiveMoveStarted;
+			MainWindow.Instance.InteractiveMoveCompleted -= MainWindow_InteractiveMoveCompleted;
 			_rootElement.RemoveHandler(UIElement.PointerPressedEvent, _pointerPressedHandler);
 			_backVisual.StopAnimation("Translation.X");
 			_forwardVisual.StopAnimation("Translation.X");
+			_backAnimation.Dispose();
+			_forwardAnimation.Dispose();
 			_tracker.Dispose();
 			_source.Dispose();
 			_props.Dispose();

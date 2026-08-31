@@ -19,5 +19,10 @@ namespace Files.App.Data.Contracts
 		/// Gets or sets the name of the chosen IDE.
 		/// </summary>
 		string IDEName { get; set; }
+
+		/// <summary>
+		/// Gets or sets whether the app uses the native Windows title bar.
+		/// </summary>
+		bool UseNativeTitleBar { get; set; }
 	}
 }

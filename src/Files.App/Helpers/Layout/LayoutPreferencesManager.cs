@@ -255,52 +255,63 @@ namespace Files.App.Helpers
 
 		public void ToggleLayoutModeColumnView(bool manuallySet)
 		{
+			var previousLayoutMode = LayoutMode;
 			IsAdaptiveLayoutEnabled &= !manuallySet;
 
 			// Column View
 			LayoutMode = FolderLayoutModes.ColumnView;
 
-			LayoutModeChangeRequested?.Invoke(this, new LayoutModeEventArgs(FolderLayoutModes.ColumnView));
+			RaiseLayoutModeChangeIfChanged(previousLayoutMode);
 		}
 
 		public void ToggleLayoutModeGridView(bool manuallySet)
 		{
+			var previousLayoutMode = LayoutMode;
 			IsAdaptiveLayoutEnabled &= !manuallySet;
 
 			// Grid View
 			LayoutMode = FolderLayoutModes.GridView;
 
-			LayoutModeChangeRequested?.Invoke(this, new LayoutModeEventArgs(FolderLayoutModes.GridView));
+			RaiseLayoutModeChangeIfChanged(previousLayoutMode);
 		}
 
 		public void ToggleLayoutModeCards(bool manuallySet)
 		{
+			var previousLayoutMode = LayoutMode;
 			IsAdaptiveLayoutEnabled &= !manuallySet;
 
 			// Cards View
 			LayoutMode = FolderLayoutModes.CardsView;
 
-			LayoutModeChangeRequested?.Invoke(this, new LayoutModeEventArgs(FolderLayoutModes.CardsView));
+			RaiseLayoutModeChangeIfChanged(previousLayoutMode);
 		}
 
 		public void ToggleLayoutModeList(bool manuallySet)
 		{
+			var previousLayoutMode = LayoutMode;
 			IsAdaptiveLayoutEnabled &= !manuallySet;
 
 			// List View
 			LayoutMode = FolderLayoutModes.ListView;
 
-			LayoutModeChangeRequested?.Invoke(this, new LayoutModeEventArgs(FolderLayoutModes.ListView));
+			RaiseLayoutModeChangeIfChanged(previousLayoutMode);
 		}
 
 		public void ToggleLayoutModeDetailsView(bool manuallySet)
 		{
+			var previousLayoutMode = LayoutMode;
 			IsAdaptiveLayoutEnabled &= !manuallySet;
 
 			// Details View
 			LayoutMode = FolderLayoutModes.DetailsView;
 
-			LayoutModeChangeRequested?.Invoke(this, new LayoutModeEventArgs(FolderLayoutModes.DetailsView));
+			RaiseLayoutModeChangeIfChanged(previousLayoutMode);
+		}
+
+		private void RaiseLayoutModeChangeIfChanged(FolderLayoutModes previousLayoutMode)
+		{
+			if (LayoutMode != previousLayoutMode)
+				LayoutModeChangeRequested?.Invoke(this, new LayoutModeEventArgs(LayoutMode));
 		}
 
 		public void ToggleLayoutModeAdaptive()
