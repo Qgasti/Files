@@ -34,6 +34,7 @@ namespace Files.App.ViewModels
 	{
 		private const int MaxConcurrentExtendedPropertyLoads = 4;
 		private const int MaxConcurrentThumbnailPrefetchLoads = 1;
+		private const int GitPathDetectionInlineBudgetMilliseconds = 5;
 
 		private static readonly SemaphoreSlim extendedPropertiesSemaphore = new(MaxConcurrentExtendedPropertyLoads, MaxConcurrentExtendedPropertyLoads);
 		private static readonly SemaphoreSlim thumbnailPrefetchSemaphore = new(MaxConcurrentThumbnailPrefetchLoads, MaxConcurrentThumbnailPrefetchLoads);
@@ -272,7 +273,20 @@ namespace Files.App.ViewModels
 			else
 			{
 				var gitPathDetectionStartedTimestamp = Stopwatch.GetTimestamp();
-				var gitDirectory = await Task.Run(() => GitHelpers.GetGitRepositoryPath(value, pathRoot));
+				long gitPathDetectionExecutionStartedTimestamp = 0;
+				long gitPathDetectionExecutionCompletedTimestamp = 0;
+				var gitPathDetectionTask = Task.Run(() =>
+				{
+					gitPathDetectionExecutionStartedTimestamp = Stopwatch.GetTimestamp();
+					var result = GitHelpers.GetGitRepositoryPath(value, pathRoot);
+					gitPathDetectionExecutionCompletedTimestamp = Stopwatch.GetTimestamp();
+					return result;
+				});
+				var completedWithinInlineBudget = Task.WaitAny([gitPathDetectionTask], GitPathDetectionInlineBudgetMilliseconds) == 0;
+				var gitDirectory = completedWithinInlineBudget
+					? gitPathDetectionTask.GetAwaiter().GetResult()
+					: await gitPathDetectionTask;
+				var gitPathDetectionContinuationTimestamp = Stopwatch.GetTimestamp();
 				var gitPathDetectionElapsed = Stopwatch.GetElapsedTime(gitPathDetectionStartedTimestamp);
 				if (!string.Equals(WorkingDirectory, value, StringComparison.OrdinalIgnoreCase))
 					return;
@@ -281,9 +295,13 @@ namespace Files.App.ViewModels
 				GitHead = null;
 				IsValidGitDirectory = !string.IsNullOrEmpty(gitDirectory);
 				App.Logger.LogInformation(
-					"Git repository marker detection for {Path} completed in {ElapsedMs:F1} ms (repository marker: {HasRepositoryMarker}, HEAD deferred: {HeadDeferred}).",
+					"Git repository marker detection for {Path} completed in {ElapsedMs:F1} ms (queue/execution/continuation: {QueueMs:F1}/{ExecutionMs:F1}/{ContinuationMs:F1} ms, inline completion: {InlineCompletion}, repository marker: {HasRepositoryMarker}, HEAD deferred: {HeadDeferred}).",
 					LogPathHelper.GetPathIdentifier(WorkingDirectory),
 					gitPathDetectionElapsed.TotalMilliseconds,
+					Stopwatch.GetElapsedTime(gitPathDetectionStartedTimestamp, gitPathDetectionExecutionStartedTimestamp).TotalMilliseconds,
+					Stopwatch.GetElapsedTime(gitPathDetectionExecutionStartedTimestamp, gitPathDetectionExecutionCompletedTimestamp).TotalMilliseconds,
+					Stopwatch.GetElapsedTime(gitPathDetectionExecutionCompletedTimestamp, gitPathDetectionContinuationTimestamp).TotalMilliseconds,
+					completedWithinInlineBudget,
 					IsValidGitDirectory,
 					IsValidGitDirectory);
 

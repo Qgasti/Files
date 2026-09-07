@@ -17,6 +17,7 @@ Folder-load instrumentation records the following entries in `debug.log`:
 - Cached/icon and generated-thumbnail counts, average duration, and maximum duration.
 - Large watcher metadata burst path counts, batch counts, elapsed time, remaining backlog, and new-event interruptions.
 - Persistent thumbnail-cache trim entry counts, released bytes, and elapsed time.
+- Git repository marker detection queue, execution, and UI-continuation durations, including whether the result completed inside the bounded inline window.
 
 The instrumentation is implemented in `ShellViewModel.Performance.cs`. It does not improve performance by itself.
 
@@ -376,6 +377,9 @@ Every behavior-changing phase must satisfy all applicable gates:
 - Adaptive media classification was still taking 266.6-281.9 ms because each item performed up to three `Directory.Exists` calls through the generic extension helper. Image, audio, and video classification now uses case-insensitive frozen sets without filesystem access, and the adaptive scan exits as soon as either layout result is mathematically fixed. Redundant requests for the already-active concrete layout also stop before raising a layout-change event.
 - The adaptive-classification candidate and the complete `Files.App` `Debug|x64` build succeeded. Runtime timing remains deliberately unclaimed: the pre-change System32 run accumulated 1,407.6 ms of Dispatcher wait plus 281.9 ms of adaptive work and 132.0 ms of Details auto-fit, and the user closed the temporarily unresponsive window before a post-change run. No unhandled exception or crash entry was recorded.
 - Details AutoFit now snapshots the 15 resizable column widths before applying calculated values and persists the column model only when at least one width changed. This preserves required saves after content or viewport changes while skipping the unconditional 41-70 ms settings write measured on repeated fits; the performance log now records whether persistence occurred. The complete `Files.App` `Debug|x64` build succeeded, while post-change runtime timing remains a manual follow-up.
+- Git marker instrumentation isolated a cold-start delay that had previously been attributed to marker I/O. A System32 control spent 508.0 ms in marker detection, but only 0.1 ms was thread-pool queueing and 1.0 ms was actual marker scanning; resuming the captured UI continuation consumed the remaining 506.9 ms and delayed the folder-load start.
+- Marker detection now waits synchronously for at most 5 ms before retaining the original asynchronous path. Fast local results therefore stay on the current navigation stack without yielding behind startup UI work, while slow disk, network, or repository walks add no more than 5 ms before behaving as before. The equivalent System32 run completed marker detection in 1.4 ms with a 0.2 ms continuation and started folder loading about 399 ms earlier relative to app launch. Total folder-load time remained variable and is not claimed as improved from this single run.
+- A real repository regression completed its positive marker lookup inline in 1.1 ms. Folder loading started normally with the Git item model, the 767.4 ms HEAD validation remained in the background, the context retained the repository, all 23 items loaded, and automatic fetch began only after folder completion. The process remained responsive in both controlled runs and was closed after logging.
 
 ## Risks
 
